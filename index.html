@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#4a3cc4">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Record naps in one tap and get nap and bedtime recommendations that learn your baby's rhythm. Import your Huckleberry history.">
+  <title>Napberry</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Napberry">
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+  <div id="app">
+    <header id="top" class="top"></header>
+    <main id="main"></main>
+    <nav id="tabs" class="tabs" aria-label="Sections"></nav>
+  </div>
+  <dialog id="dialog"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <input id="csv-input" type="file" accept=".csv,text/csv,text/plain" hidden>
+  <input id="json-input" type="file" accept=".json,application/json" hidden>
+  <noscript><p style="padding:16px">Napberry needs JavaScript to run.</p></noscript>
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>

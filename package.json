@@ -1,0 +1,11 @@
+{
+  "name": "napberry",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nap tracker with wake-window recommendations and Huckleberry CSV import",
+  "type": "module",
+  "scripts": {
+    "start": "npx http-server . -p 8080 -c-1",
+    "test": "node --test"
+  }
+}
