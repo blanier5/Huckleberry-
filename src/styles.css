@@ -49,6 +49,11 @@
   box-sizing: border-box;
 }
 
+/* Author styles like display:flex would otherwise beat the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
 html {
   -webkit-text-size-adjust: 100%;
 }
@@ -447,6 +452,7 @@ details li + li {
 input[type='text'],
 input[type='date'],
 input[type='time'],
+input[type='url'],
 input[type='datetime-local'],
 select,
 textarea {
@@ -614,4 +620,34 @@ dialog h2 {
 .hero .eyebrow,
 .empty p {
   text-wrap: balance;
+}
+
+.head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sync-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--good);
+}
+
+.sync-dot.syncing,
+.sync-dot.idle {
+  background: var(--muted);
+}
+
+.sync-dot.offline,
+.sync-dot.error {
+  background: var(--warn);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 64px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
 }

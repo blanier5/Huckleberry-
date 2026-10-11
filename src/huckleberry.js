@@ -1,5 +1,5 @@
 import { parseCSV } from './csv.js';
-import { classifySleep, sleepKey } from './analysis.js';
+import { classifySleep, sleepId } from './analysis.js';
 import { MIN } from './time.js';
 
 // Huckleberry's CSV export has one row per tracked event with columns like
@@ -193,17 +193,17 @@ export function parseHuckleberryCSV(text) {
     if (minutes < 1) return invalid('shorter than a minute or ends before it starts');
     if (minutes > 20 * 60) return invalid('longer than 20 hours');
 
-    const key = sleepKey({ start, end });
-    if (seen.has(key)) {
+    const id = sleepId(start);
+    if (seen.has(id)) {
       stats.skippedInvalid++;
-      if (stats.invalid.length < 5) stats.invalid.push({ line, reason: 'duplicate row in file' });
+      if (stats.invalid.length < 5) stats.invalid.push({ line, reason: 'another sleep in this file starts at the same time' });
       return;
     }
-    seen.add(key);
+    seen.add(id);
 
     const kind = classifySleep(start, end);
     sleeps.push({
-      id: `imp-${key}`,
+      id,
       start,
       end,
       kind,

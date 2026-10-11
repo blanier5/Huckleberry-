@@ -7,5 +7,8 @@
   "scripts": {
     "start": "npx http-server . -p 8080 -c-1",
     "test": "node --test"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8"
   }
 }

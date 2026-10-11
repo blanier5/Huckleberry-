@@ -2,6 +2,7 @@ import { createStore } from './store.js';
 import { predict } from './predict.js';
 import { groupByDay, classifySleep } from './analysis.js';
 import { parseHuckleberryCSV } from './huckleberry.js';
+import { createSync, parseInvite } from './sync.js';
 import {
   MIN,
   startOfDay,
@@ -20,7 +21,8 @@ import {
 } from './time.js';
 
 const store = createStore();
-const ui = { tab: 'today', historyDays: 14, whyOpen: false, quiet: false, preview: null };
+const sync = createSync({ store });
+const ui = { tab: 'today', historyDays: 14, whyOpen: false, quiet: false, dirty: false, preview: null, joining: null, joinText: '' };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
@@ -60,7 +62,23 @@ function renderHeader() {
   const { baby } = store.state;
   $('top').hidden = !baby;
   if (!baby) return;
-  $('top').innerHTML = `<h1>${esc(baby.name || 'Baby')}</h1><span class="chip">${fmtAge(ageInMonths(baby.birth, Date.now()))}</span>`;
+  $('top').innerHTML = `<h1>${esc(baby.name || 'Baby')}</h1><span class="head-right">${syncDot()}<span class="chip">${fmtAge(ageInMonths(baby.birth, Date.now()))}</span></span>`;
+}
+
+function syncLabel() {
+  if (!sync.enabled) return 'Sync is off';
+  const { state, message, lastOk } = sync.status;
+  if (state === 'syncing') return 'Syncing…';
+  if (state === 'offline') return "Offline. Changes are saved on this phone and will sync when you're back online.";
+  if (state === 'error') return message || 'Sync problem.';
+  if (!lastOk) return 'Sync is on';
+  return Date.now() - lastOk < MIN ? 'Synced just now' : `Synced ${fmtRelative(lastOk, Date.now())}`;
+}
+
+function syncDot() {
+  if (!sync.enabled) return '';
+  const label = syncLabel();
+  return `<span class="sync-dot ${sync.status.state}" role="img" aria-label="${esc(label)}" title="${esc(label)}"></span>`;
 }
 
 function renderTabs() {
@@ -83,19 +101,28 @@ function renderMain() {
 }
 
 function viewOnboarding() {
+  const joining = ui.joining?.state === 'working';
   return `
     <div class="welcome stack">
       <div>
         <h1>Napberry</h1>
         <p>Record naps in one tap and get nap and bedtime suggestions that learn your baby's rhythm.</p>
       </div>
-      <form id="onboard" class="card">
+      ${joining ? '<section class="card empty" role="status"><h2>Joining…</h2><p class="muted">Fetching your baby and sleep history.</p></section>' : ''}
+      <form id="onboard" class="card" ${joining ? 'hidden' : ''}>
         <label class="field"><span>Baby's name</span><input type="text" name="name" autocomplete="off" required></label>
         <label class="field"><span>Birth date</span><input type="date" name="birth" max="${toInputValue(Date.now()).slice(0, 10)}" required></label>
         <p class="muted small" style="margin-top:10px">Age sets the starting wake windows. After this you can import your Huckleberry history.</p>
         <button class="btn" style="margin-top:16px">Get started</button>
       </form>
-      <p class="muted small">Everything is stored on this device only. Napberry gives general guidance, not medical advice.</p>
+      <form id="join" class="card" ${joining ? 'hidden' : ''}>
+        <h2>Already using Napberry on another phone?</h2>
+        <p class="muted small">Paste the invite link or code from that phone (Settings, then Sync) to share the same baby and sleep log. Nothing to type again.</p>
+        <label class="field"><span>Invite link or code</span><textarea name="invite" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" required>${esc(ui.joinText)}</textarea></label>
+        <p class="error" ${ui.joining?.error ? '' : 'hidden'}>${esc(ui.joining?.error ?? '')}</p>
+        <button class="btn secondary" style="margin-top:14px">Join</button>
+      </form>
+      <p class="muted small">Your data is stored on this device. Sync with another phone is optional and set up in Settings. Napberry gives general guidance, not medical advice.</p>
     </div>`;
 }
 
@@ -248,6 +275,36 @@ function viewHistory() {
     ${groups.length > shown.length ? `<button type="button" class="btn secondary" data-action="more-history">Show earlier days (${groups.length - shown.length} more)</button>` : ''}`;
 }
 
+function viewSyncCard() {
+  if (!sync.enabled) {
+    return `
+    <section class="card">
+      <h2>Sync between phones</h2>
+      <p class="muted small">Share the baby profile and every nap across both parents' phones, stored in your own free Supabase project. One-time setup; the steps are in the README.</p>
+      <form id="sync-setup">
+        <label class="field"><span>Project URL</span><input type="url" name="url" placeholder="https://abcdxyz.supabase.co" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+        <label class="field"><span>Publishable key</span><input type="text" name="key" placeholder="sb_publishable_…" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+        <p class="error" hidden></p>
+        <button class="btn" style="margin-top:14px">Turn on sync</button>
+      </form>
+    </section>`;
+  }
+  return `
+    <section class="card">
+      <h2>Sync between phones</h2>
+      <p class="small" id="sync-status" role="status">${esc(syncLabel())}</p>
+      <p class="muted small" style="margin:8px 0 12px">Send this invite to the other phone. Opening it, or pasting it on Napberry's welcome screen, sets up the same baby and sleep log. Anyone who has the invite can see and edit your data, so only share it with people you trust.</p>
+      <div class="dialog-actions" style="margin-top:0">
+        <button type="button" class="btn" data-action="share-invite">Share invite</button>
+        <button type="button" class="btn secondary" data-action="copy-invite">Copy</button>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn secondary" data-action="sync-now">Sync now</button>
+        <button type="button" class="btn danger" data-action="sync-off">Turn off here</button>
+      </div>
+    </section>`;
+}
+
 function viewSettings() {
   const { baby, settings, sleeps } = store.state;
   const fixed = Boolean(settings.bedtime);
@@ -270,6 +327,8 @@ function viewSettings() {
       <p class="muted small" id="bedtime-hint" style="margin-top:8px">${fixed ? 'Naps are planned around this time.' : `Currently about ${learned}, based on ${p.learned ? 'recent nights' : 'age'}.`}</p>
     </section>
 
+    ${viewSyncCard()}
+
     <section class="card">
       <h2>Import from Huckleberry</h2>
       <p class="muted small" style="margin-bottom:12px">Export your data from Huckleberry as a CSV, then choose the file here. You'll see a summary before anything is added, and re-importing never creates duplicates.</p>
@@ -278,7 +337,7 @@ function viewSettings() {
 
     <section class="card">
       <h2>Backup &amp; sharing</h2>
-      <p class="muted small" style="margin-bottom:12px">Data lives on this device. To use another phone, export a backup here and import it there. Importing merges, so nothing is overwritten.</p>
+      <p class="muted small" style="margin-bottom:12px">A file copy of everything on this phone, for safekeeping or moving to another phone without sync. Importing merges, so nothing is overwritten.</p>
       <div class="dialog-actions" style="margin-top:0">
         <button type="button" class="btn secondary" data-action="export-json">Export</button>
         <button type="button" class="btn secondary" data-action="pick-json">Import backup</button>
@@ -287,7 +346,7 @@ function viewSettings() {
 
     <section class="card">
       <h2>Erase everything</h2>
-      <p class="muted small" style="margin-bottom:12px">Removes ${num(sleeps.length)} logged sleeps and the baby profile from this device.</p>
+      <p class="muted small" style="margin-bottom:12px">Removes ${num(sleeps.length)} logged sleeps and the baby profile from this phone${sync.enabled ? ' and turns sync off here. The synced copy is not deleted, and you can rejoin with the invite' : ''}.</p>
       <button type="button" class="btn danger" data-action="reset">Erase all data</button>
     </section>
 
@@ -365,9 +424,10 @@ function openSleepEditor(id) {
       if (end != null && end <= start) return dialogError('Wake-up has to be after the fall-asleep time.');
       if (end != null && end - start > 20 * 60 * MIN) return dialogError('That is longer than 20 hours. Check the dates.');
       if (start > Date.now() + 5 * MIN) return dialogError('That start time is in the future.');
+      if (store.hasSleepAt(start, existing?.id)) return dialogError('Another sleep already starts at that minute.');
       const patch = { start, end, kind: form.get('kind'), notes: String(form.get('notes') || '').trim() };
-      if (existing) store.updateSleep(existing.id, patch);
-      else store.addSleep(patch);
+      const saved = existing ? store.updateSleep(existing.id, patch) : store.addSleep(patch);
+      if (!saved) return dialogError("Couldn't save that. Check the times.");
       closeDialog();
       toast('Saved');
     },
@@ -418,8 +478,7 @@ function startAt(kind) {
     kind,
     validate: (at) => (at < lastEnd ? `That overlaps the previous sleep, which ended at ${fmtClock(lastEnd)}.` : ''),
     onConfirm: (at, k) => {
-      store.startSleep(k, at);
-      toast('Sleep started');
+      toast(store.startSleep(k, at) ? 'Sleep started' : "Couldn't start. A sleep is already in progress or starts at that time.");
     },
   });
 }
@@ -542,7 +601,7 @@ const actions = {
     window.scrollTo(0, 0);
   },
   start: (el) => {
-    store.startSleep(el.dataset.kind);
+    if (!store.startSleep(el.dataset.kind)) toast('A sleep is already in progress.');
   },
   'start-at': (el) => startAt(el.dataset.kind),
   wake: () => {
@@ -565,26 +624,120 @@ const actions = {
   'pick-json': () => $('json-input').click(),
   'export-json': exportBackup,
   reset: () => {
-    if (confirm('Erase all sleep data and the baby profile from this device? This cannot be undone.')) {
+    const extra = sync.enabled ? ' Sync turns off on this phone; the synced copy is not deleted.' : '';
+    if (confirm(`Erase all sleep data and the baby profile from this phone? This cannot be undone.${extra}`)) {
+      sync.leave();
       store.reset();
       ui.tab = 'today';
       toast('All data erased');
     }
   },
+  'sync-now': async () => {
+    toast('Syncing…');
+    await sync.syncNow();
+    toast(sync.status.state === 'ok' ? 'Up to date' : syncLabel());
+  },
+  'sync-off': () => {
+    if (confirm('Turn off sync on this phone? Your data stays here, and you can rejoin later with the invite.')) {
+      sync.leave();
+      render();
+      toast('Sync turned off');
+    }
+  },
+  'copy-invite': async () => {
+    if (await copyText(inviteLink())) toast('Invite copied');
+    else showInviteDialog();
+  },
+  'share-invite': async () => {
+    const url = inviteLink();
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: 'Napberry', text: `Join ${store.state.baby?.name ?? 'our baby'}'s sleep log on Napberry`, url });
+      } catch {
+        /* cancelled */
+      }
+    } else if (await copyText(url)) toast('Invite copied');
+    else showInviteDialog();
+  },
 };
+
+const inviteLink = () => `${location.origin}${location.pathname}#join=${sync.invite()}`;
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function showInviteDialog() {
+  showDialog(`<form><h2>Invite link</h2><p class="muted small">Copy this and send it to the other phone.</p>
+    <label class="field"><textarea readonly rows="4" onfocus="this.select()">${esc(inviteLink())}</textarea></label>
+    <div class="dialog-actions"><button type="button" class="btn" data-action="close">Done</button></div></form>`);
+}
+
+const errorText = (err) => (err && err.message) || 'Something went wrong. Try again.';
+
+function formError(form, msg) {
+  const el = form.querySelector('.error');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = !msg;
+}
+
+async function joinWith(text) {
+  ui.joinText = text;
+  ui.joining = { state: 'working' };
+  renderMain();
+  try {
+    await sync.join(text);
+    ui.joining = null;
+    ui.joinText = '';
+    render();
+    toast(store.state.baby ? 'Joined. Everything is here.' : 'Joined. Set up the baby below.');
+  } catch (err) {
+    // On the welcome screen the error shows under the form; otherwise there is no form to show it in.
+    ui.joining = store.state.baby ? null : { error: errorText(err) };
+    render();
+    if (store.state.baby) toast(errorText(err));
+  }
+}
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action]');
   if (el) actions[el.dataset.action]?.(el);
 });
 
-document.addEventListener('submit', (e) => {
-  if (e.target.id !== 'onboard') return;
-  e.preventDefault();
-  const form = new FormData(e.target);
-  const birth = parseDateOnly(form.get('birth'));
-  if (birth == null) return;
-  store.setBaby({ name: String(form.get('name')).trim(), birth });
+document.addEventListener('submit', async (e) => {
+  const form = e.target;
+  if (form.id === 'onboard') {
+    e.preventDefault();
+    const data = new FormData(form);
+    const birth = parseDateOnly(data.get('birth'));
+    if (birth == null) return;
+    store.setBaby({ name: String(data.get('name')).trim(), birth });
+  } else if (form.id === 'join') {
+    e.preventDefault();
+    joinWith(String(new FormData(form).get('invite')));
+  } else if (form.id === 'sync-setup') {
+    e.preventDefault();
+    const data = new FormData(form);
+    const btn = form.querySelector('button');
+    btn.disabled = true;
+    btn.textContent = 'Checking…';
+    formError(form, '');
+    try {
+      await sync.enable({ url: String(data.get('url')), key: String(data.get('key')) });
+      render();
+      toast('Sync is on. Share the invite with the other phone.');
+    } catch (err) {
+      formError(form, errorText(err));
+      btn.disabled = false;
+      btn.textContent = 'Turn on sync';
+    }
+  }
 });
 
 document.addEventListener('change', (e) => {
@@ -621,13 +774,42 @@ document.addEventListener('toggle', (e) => {
   if (e.target.id === 'why') ui.whyOpen = e.target.open;
 }, true);
 
-store.subscribe(() => {
-  if (ui.quiet) renderHeader();
-  else render();
+const editingInMain = () => {
+  const a = document.activeElement;
+  return Boolean(a && $('main').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+};
+
+store.subscribe((_state, meta) => {
+  if (ui.quiet) return renderHeader();
+  // Don't wipe a field someone is typing in just because the other phone synced something.
+  if (meta?.remote && editingInMain()) {
+    ui.dirty = true;
+    return renderHeader();
+  }
+  render();
+});
+
+document.addEventListener('focusout', () => {
+  if (!ui.dirty) return;
+  setTimeout(() => {
+    if (!editingInMain()) {
+      ui.dirty = false;
+      renderMain();
+    }
+  }, 0);
+});
+
+sync.onChange(() => {
+  renderHeader();
+  const el = $('sync-status');
+  if (el) el.textContent = syncLabel();
 });
 
 function tick() {
-  if (document.hidden || !store.state.baby || ui.tab !== 'today' || $('dialog').open) return;
+  if (document.hidden) return;
+  const el = $('sync-status');
+  if (el) el.textContent = syncLabel();
+  if (!store.state.baby || ui.tab !== 'today' || $('dialog').open) return;
   renderMain();
 }
 setInterval(tick, 15_000);
@@ -638,7 +820,25 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// Opened from an invite link? Join before showing the welcome screen.
+const linked = /#join=(nb1\.[A-Za-z0-9_-]+)/.exec(location.hash);
+if (linked) history.replaceState(null, '', location.pathname + location.search);
+const linkedInvite = linked && parseInvite(linked[1]) ? linked[1] : null;
+const alreadyThere = linkedInvite && sync.enabled && sync.invite() === linkedInvite;
+const joinNow = linkedInvite && !alreadyThere && (!sync.enabled || confirm('This phone already syncs with a different Napberry. Switch to the one in this invite? Sleeps on this phone are added to it.'));
+
+if (joinNow) ui.joining = { state: 'working' };
 render();
+if (joinNow) joinWith(linkedInvite);
+else {
+  sync.start();
+  if (alreadyThere) toast('Already joined');
+  else if (linked) {
+    ui.joinText = linked[1];
+    ui.joining = { error: "That invite link looks incomplete. Ask for it to be sent again." };
+    render();
+  }
+}
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

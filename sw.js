@@ -1,6 +1,6 @@
 // Offline support: network-first so updates show up immediately, with the
 // cache as a fallback when there's no connection (e.g. at 3am in a dark room).
-const CACHE = 'napberry-v1';
+const CACHE = 'napberry-v2';
 const SHELL = [
   './',
   'index.html',
@@ -14,6 +14,7 @@ const SHELL = [
   'src/norms.js',
   'src/predict.js',
   'src/store.js',
+  'src/sync.js',
   'src/time.js',
 ];
 
