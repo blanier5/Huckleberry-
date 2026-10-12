@@ -18,8 +18,13 @@ export function classifySleep(start, end) {
   return tod >= 18 * 60 || tod < 5 * 60 + 30 ? 'night' : 'nap';
 }
 
-export function sleepKey(s) {
-  return `${Math.round(s.start / MIN)}-${s.end == null ? 'open' : Math.round(s.end / MIN)}`;
+/**
+ * A baby can't start two sleeps in the same minute, so the start minute identifies a sleep.
+ * Every device derives the same id on its own, which is what lets re-imports and sync
+ * merge without creating duplicates.
+ */
+export function sleepId(start) {
+  return `s${Math.round(start / MIN)}`;
 }
 
 /**
