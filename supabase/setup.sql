@@ -69,7 +69,8 @@ begin
     from naps_profiles
    where family_id = p_family;
 
-  return jsonb_build_object('profile', v_profile, 'sleeps', v_sleeps, 'cursor', v_cursor);
+  -- `version` lets the app tell when this script is older than it needs (and nudge you to re-run it).
+  return jsonb_build_object('profile', v_profile, 'sleeps', v_sleeps, 'cursor', v_cursor, 'version', 2);
 end;
 $$;
 

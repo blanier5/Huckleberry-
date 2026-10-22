@@ -434,3 +434,84 @@ test('the profile already on a server (only a bedtime) joins a phone with no dat
   assert.equal(fresh2.store.state.sleeps.length, 2);
   assert.equal(old.store.state.sleeps.length, 2);
 });
+
+/** A phone whose server answers like the earlier database script: no `version` in pull responses. */
+function phoneOnOldDatabase(be, startTime, state) {
+  const storage = memoryStorage();
+  const clock = { now: startTime };
+  const store = createStore(storage, { clock: () => clock.now });
+  const sync = createSync({
+    store,
+    storage,
+    clock: () => clock.now,
+    doc: null,
+    win: null,
+    pushDelay: null,
+    makeRemote: (cfg) =>
+      createRemote({
+        ...cfg,
+        fetch: async (u, i) => {
+          const res = await be.fetch(u, i);
+          if (state.old && String(u).endsWith('naps_pull') && res.ok) {
+            const body = await res.json();
+            delete body.version;
+            return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+          }
+          return res;
+        },
+      }),
+  });
+  return { store, sync, storage };
+}
+
+test('the app notices when the Supabase script is older than it needs, and stops once it is updated', { skip }, async () => {
+  await fresh();
+  const state = { old: true };
+  const a = phoneOnOldDatabase(backend, T0, state);
+  a.store.setBaby(MIA);
+  assert.equal(a.sync.dbOutdated, false, 'unknown until the first sync');
+  await a.sync.enable(setup);
+  assert.equal(a.sync.dbOutdated, true);
+  assert.equal(a.sync.status.dbOutdated, true);
+
+  // Still works, and keeps being flagged on later syncs.
+  a.store.mergeSleeps([nap(9, 0)]);
+  await a.sync.syncNow();
+  assert.equal(a.sync.dbOutdated, true);
+  assert.equal(a.sync.status.state, 'ok');
+
+  // The script is re-run: the server now reports its version.
+  state.old = false;
+  await a.sync.syncNow();
+  assert.equal(a.sync.dbOutdated, false);
+  assert.equal(a.sync.status.dbOutdated, false);
+  assert.equal(a.store.state.sleeps.length, 1);
+});
+
+test('an up-to-date database is never flagged; turning sync off clears the flag', { skip }, async () => {
+  await fresh();
+  const a = phone(backend, T0);
+  a.store.setBaby(MIA);
+  await a.sync.enable(setup);
+  assert.equal(a.sync.dbOutdated, false);
+
+  const state = { old: true };
+  const b = phoneOnOldDatabase(backend, T0, state);
+  b.store.setBaby(MIA);
+  await b.sync.join(a.sync.invite());
+  assert.equal(b.sync.dbOutdated, true);
+  b.sync.leave();
+  assert.equal(b.sync.dbOutdated, false);
+});
+
+test('the SQL editor link points at the connected Supabase project', () => {
+  const storage = memoryStorage();
+  const family = newFamilyCode();
+  storage.setItem('napberry:sync:v1', JSON.stringify({ url: 'https://abcdefghijklmnop.supabase.co', key: 'sb_publishable_x', family, cursor: 0 }));
+  const store = createStore(memoryStorage());
+  const sync = createSync({ store, storage, doc: null, win: null, pushDelay: null });
+  assert.equal(sync.sqlEditorUrl(), 'https://supabase.com/dashboard/project/abcdefghijklmnop/sql/new');
+  const other = memoryStorage();
+  other.setItem('napberry:sync:v1', JSON.stringify({ url: 'http://localhost:54321', key: 'k', family, cursor: 0 }));
+  assert.equal(createSync({ store, storage: other, doc: null, win: null, pushDelay: null }).sqlEditorUrl(), null);
+});

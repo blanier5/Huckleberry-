@@ -47,7 +47,7 @@ test('rejects short or malformed family codes', { skip }, async () => {
 
 test('empty family: no profile, no sleeps, cursor stays', { skip }, async () => {
   const r = await pull(FAM, 0);
-  assert.deepEqual(r, { profile: null, sleeps: [], cursor: 0 });
+  assert.deepEqual(r, { profile: null, sleeps: [], cursor: 0, version: 2 });
   assert.equal((await pull(FAM, 42)).cursor, 42);
 });
 
