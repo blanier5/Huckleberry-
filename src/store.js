@@ -1,5 +1,6 @@
 import { MIN } from './time.js';
 import { classifySleep, sleepId } from './analysis.js';
+import { defaultSettings, cleanSettings, cleanSettingsPatch, cleanFlags } from './settings.js';
 
 const KEY = 'napberry:v1';
 const VERSION = 2;
@@ -7,7 +8,7 @@ const VERSION = 2;
 const EMPTY = () => ({
   version: VERSION,
   baby: null,
-  settings: { bedtime: null },
+  settings: defaultSettings(),
   profileAt: 0, // when the baby profile / settings last changed (for sync)
   sleeps: [],
   tombstones: {}, // id -> when it was deleted, so a delete can't be undone by a phone that missed it
@@ -30,6 +31,7 @@ function cleanSleep(s) {
   if (!s || !Number.isFinite(s.start)) return null;
   const end = s.end == null ? null : Number(s.end);
   if (end != null && (!Number.isFinite(end) || end <= s.start)) return null;
+  const flags = cleanFlags(s.flags);
   return {
     id: sleepId(s.start),
     start: s.start,
@@ -37,6 +39,7 @@ function cleanSleep(s) {
     kind: s.kind === 'night' ? 'night' : s.kind === 'nap' ? 'nap' : classifySleep(s.start, end),
     notes: String(s.notes ?? '').slice(0, 500),
     ...(s.source ? { source: String(s.source).slice(0, 40) } : {}),
+    ...(flags ? { flags } : {}),
     updatedAt: Number.isFinite(s.updatedAt) ? s.updatedAt : 0,
   };
 }
@@ -82,6 +85,8 @@ export function createStore(storage = defaultStorage(), { clock = () => Date.now
   } catch {
     state = EMPTY();
   }
+  // Settings added in later versions are absent from older saves: fill them in (nothing is removed).
+  state.settings = cleanSettings(state.settings);
 
   function persist() {
     try {
@@ -141,14 +146,14 @@ export function createStore(storage = defaultStorage(), { clock = () => Date.now
       commit();
     },
     setSettings(patch) {
-      state.settings = { ...state.settings, ...patch };
+      state.settings = { ...state.settings, ...cleanSettingsPatch(patch) };
       profileChanged();
       commit();
     },
 
-    startSleep(kind, at = clock()) {
+    startSleep(kind, at = clock(), flags) {
       if (store.ongoing || store.hasSleepAt(at)) return null;
-      const s = cleanSleep({ start: at, end: null, kind });
+      const s = cleanSleep({ start: at, end: null, kind, flags });
       if (!s) return null;
       touch(s);
       state.sleeps.push(s);
@@ -257,7 +262,7 @@ export function createStore(storage = defaultStorage(), { clock = () => Date.now
       for (const id of Object.keys(state.pending.sleeps)) {
         const live = find(id);
         if (live) {
-          sleeps.push({ id, start: live.start, end: live.end, kind: live.kind, notes: live.notes, source: live.source ?? null, deleted: false, updatedAt: live.updatedAt });
+          sleeps.push({ id, start: live.start, end: live.end, kind: live.kind, notes: live.notes, source: live.source ?? null, flags: live.flags ?? null, deleted: false, updatedAt: live.updatedAt });
         } else if (state.tombstones[id] != null) {
           sleeps.push({ id, deleted: true, updatedAt: state.tombstones[id] });
         } else {
@@ -266,7 +271,7 @@ export function createStore(storage = defaultStorage(), { clock = () => Date.now
       }
       const profile =
         state.pending.profile && state.baby
-          ? { baby: state.baby, settings: { bedtime: state.settings.bedtime ?? null }, updatedAt: state.profileAt }
+          ? { baby: state.baby, settings: cleanSettings(state.settings), updatedAt: state.profileAt }
           : null;
       return { profile, sleeps };
     },
@@ -318,7 +323,8 @@ export function createStore(storage = defaultStorage(), { clock = () => Date.now
           if (local) state.sleeps = state.sleeps.filter((s) => s.id !== r.id);
           state.tombstones[r.id] = r.updatedAt;
         } else {
-          const s = cleanSleep({ ...r, updatedAt: r.updatedAt });
+          // A server that predates the flags column sends none; keep what this phone already knows.
+          const s = cleanSleep({ ...r, flags: r.flags !== undefined ? r.flags : local?.flags, updatedAt: r.updatedAt });
           if (!s || s.id !== r.id) continue;
           if (local) state.sleeps[state.sleeps.indexOf(local)] = s;
           else state.sleeps.push(s);
@@ -337,9 +343,10 @@ export function createStore(storage = defaultStorage(), { clock = () => Date.now
       }
 
       if (profile && typeof profile.baby?.name === 'string' && Number.isFinite(profile.baby.birth) && Number.isFinite(profile.updatedAt) && profile.updatedAt > state.profileAt) {
-        const bedtime = /^\d{2}:\d{2}$/.test(profile.settings?.bedtime ?? '') ? profile.settings.bedtime : null;
         state.baby = { name: profile.baby.name.slice(0, 100), birth: profile.baby.birth };
-        state.settings = { ...state.settings, bedtime };
+        // Only settings the other phone actually sent are taken; an older version that doesn't know
+        // about newer settings can't erase them.
+        state.settings = { ...state.settings, ...cleanSettingsPatch(profile.settings) };
         state.profileAt = profile.updatedAt;
         state.pending.profile = false;
         changed = true;

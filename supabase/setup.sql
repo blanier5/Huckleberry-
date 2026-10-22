@@ -29,6 +29,9 @@ create table if not exists public.naps_sleeps (
   primary key (family_id, id)
 );
 
+-- Added later ("fell asleep early" notes). Safe to run on a database that already has the table.
+alter table public.naps_sleeps add column if not exists flags jsonb;
+
 create index if not exists naps_sleeps_family_seq on public.naps_sleeps (family_id, seq);
 
 alter table public.naps_profiles enable row level security;
@@ -55,7 +58,7 @@ begin
 
   select coalesce(jsonb_agg(jsonb_build_object(
            'id', id, 'start', start_ms, 'end', end_ms, 'kind', kind, 'notes', notes,
-           'source', source, 'deleted', deleted, 'updatedAt', updated_at) order by seq), '[]'::jsonb),
+           'source', source, 'flags', flags, 'deleted', deleted, 'updatedAt', updated_at) order by seq), '[]'::jsonb),
          coalesce(max(seq), coalesce(p_cursor, 0))
     into v_sleeps, v_cursor
     from naps_sleeps
@@ -107,7 +110,7 @@ begin
 
   with incoming as (
     select * from jsonb_to_recordset(coalesce(p_sleeps, '[]'::jsonb))
-      as x(id text, start bigint, "end" bigint, kind text, notes text, source text, deleted boolean, "updatedAt" bigint)
+      as x(id text, start bigint, "end" bigint, kind text, notes text, source text, flags jsonb, deleted boolean, "updatedAt" bigint)
   ), valid as (
     select id,
            start,
@@ -115,6 +118,7 @@ begin
            kind,
            left(notes, 500) as notes,
            left(source, 40) as source,
+           case when jsonb_typeof(flags) = 'object' and length(flags::text) < 200 then flags else null end as flags,
            coalesce(deleted, false) as deleted,
            "updatedAt" as updated_at
       from incoming
@@ -129,11 +133,11 @@ begin
          )
        )
   ), written as (
-    insert into naps_sleeps (family_id, id, start_ms, end_ms, kind, notes, source, deleted, updated_at)
-    select p_family, id, start, "end", kind, notes, source, deleted, updated_at from valid
+    insert into naps_sleeps (family_id, id, start_ms, end_ms, kind, notes, source, flags, deleted, updated_at)
+    select p_family, id, start, "end", kind, notes, source, flags, deleted, updated_at from valid
     on conflict (family_id, id) do update
       set start_ms = excluded.start_ms, end_ms = excluded.end_ms, kind = excluded.kind,
-          notes = excluded.notes, source = excluded.source, deleted = excluded.deleted,
+          notes = excluded.notes, source = excluded.source, flags = excluded.flags, deleted = excluded.deleted,
           updated_at = excluded.updated_at, seq = nextval('public.naps_seq')
       where excluded.updated_at > naps_sleeps.updated_at
     returning 1

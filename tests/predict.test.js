@@ -2,141 +2,220 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { predict } from '../src/predict.js';
 import { MIN } from '../src/time.js';
-import { ageNorms, slotFactor } from '../src/norms.js';
-import { at, generateHistory } from './helpers.js';
+import { at, generateRhythm } from './helpers.js';
 
 const TODAY = at(2026, 10, 10);
-const BABY = { name: 'Test', birth: at(2026, 3, 10) }; // ~7 months
+const BABY = { name: 'Test', birth: at(2026, 7, 25) }; // about 2.5 months
 const sleep = (start, end, kind = 'nap') => ({ id: `${start}`, start, end, kind, notes: '' });
-const history = () => generateHistory({ endDay: TODAY, days: 21 });
-const near = (actual, expected, toleranceMin, msg) =>
-  assert.ok(Math.abs(actual - expected) <= toleranceMin * MIN, `${msg ?? ''} off by ${((actual - expected) / MIN).toFixed(1)} min`);
+const D = (h, m = 0) => at(2026, 10, 10, h, m);
+const clock = (ms) => new Date(ms).toTimeString().slice(0, 5);
+const near = (a, b, tol, msg) => assert.ok(Math.abs(a - b) <= tol * MIN, `${msg ?? ''} ${clock(a)} vs ${clock(b)}`);
+const history = (over = {}) => generateRhythm({ endDay: TODAY, days: 14, seed: 11, ...over });
+const bedOf = (p) => [p.next, ...p.later].find((i) => i.kind === 'bedtime');
+const napsOf = (p) => [p.next, ...p.later].filter((i) => i.kind === 'nap');
 
-test('age norms interpolate smoothly and shrink naps with age', () => {
-  assert.equal(ageNorms(7).naps, 3);
-  assert.equal(ageNorms(7).ww, 140);
-  assert.equal(ageNorms(14).naps, 2);
-  assert.equal(ageNorms(20).naps, 1);
-  assert.ok(ageNorms(3).ww < ageNorms(9).ww);
-  assert.ok(slotFactor(0, 3) < slotFactor(3, 3));
-});
-
-test('with no history: age-based nap window from the morning wake-up', () => {
-  const wake = at(2026, 10, 10, 6, 45);
-  const sleeps = [sleep(at(2026, 10, 9, 19, 0), wake, 'night')];
-  const p = predict({ sleeps, baby: BABY, now: wake + 30 * MIN });
+test('with no history it starts from typical windows for her age and ends in bedtime', () => {
+  const wake = D(8);
+  const p = predict({ sleeps: [sleep(at(2026, 10, 9, 20, 30), wake, 'night')], baby: BABY, now: wake + 20 * MIN });
   assert.equal(p.mode, 'awake');
   assert.equal(p.learned, null);
   assert.equal(p.next.kind, 'nap');
   assert.equal(p.next.number, 1);
-  // 140 min typical * 0.88 first-window factor = 123, then fitted to the day (~1%).
-  near(p.next.at, wake + 122 * MIN, 3, 'age-based first window');
-  assert.ok(p.later.some((i) => i.kind === 'bedtime'), 'forecast ends in bedtime');
+  const w = (p.next.at - wake) / MIN;
+  assert.ok(w > 55 && w < 100, `first window ${w}`);
+  assert.ok(bedOf(p), 'the forecast reaches bedtime');
+  assert.ok(p.reasons.some((r) => /typical at/i.test(r)));
 });
 
-test('learns from history: first window moves toward the baby\'s own pattern', () => {
-  const wake = at(2026, 10, 10, 6, 45);
-  const sleeps = history();
-  const p = predict({ sleeps, baby: BABY, now: wake + 30 * MIN });
-  assert.ok(p.learned && p.learned.days >= 14);
-  assert.equal(p.napsExpected, 3);
-  // Own windows are ~115 min, age norm ~140: 82% personal => ~120.
-  const lastWake = sleeps[sleeps.length - 1].end;
-  near(p.next.at, lastWake + 120 * MIN, 8);
-  assert.ok(p.next.at < lastWake + 140 * MIN);
+test('learns her own windows (from every recent day, whatever the nap count)', () => {
+  const sleeps = history({ window: () => 62, napLen: () => 35 });
+  const wake = sleeps.filter((s) => s.kind === 'night').at(-1).end;
+  const p = predict({ sleeps, baby: BABY, now: wake + 10 * MIN });
+  assert.ok(p.learned && p.learned.windows >= 40);
+  const w = (p.next.at - wake) / MIN;
+  assert.ok(w < 78, `her short windows pull the first one in: ${w.toFixed(0)}`);
 });
 
-test('a short nap pulls the next wake window in', () => {
-  const sleeps = history();
-  const wake = sleeps[sleeps.length - 1].end;
-  const normal = [...sleeps, sleep(wake + 115 * MIN, wake + 175 * MIN)];
-  const short = [...sleeps, sleep(wake + 115 * MIN, wake + 140 * MIN)];
-  const pn = predict({ sleeps: normal, baby: BABY, now: wake + 180 * MIN });
-  const ps = predict({ sleeps: short, baby: BABY, now: wake + 145 * MIN });
-  assert.equal(pn.napsToday, 1);
-  assert.equal(ps.napsToday, 1);
-  assert.ok(ps.next.window < pn.next.window * 0.9, `${ps.next.window} vs ${pn.next.window}`);
-  assert.ok(ps.reasons.some((r) => /short/i.test(r)));
-});
-
-test('after the usual number of naps, bedtime is next', () => {
-  const sleeps = history();
-  const wake = sleeps[sleeps.length - 1].end;
-  const naps = [
-    sleep(wake + 115 * MIN, wake + 175 * MIN),
-    sleep(wake + 305 * MIN, wake + 380 * MIN),
-    sleep(wake + 525 * MIN, wake + 560 * MIN),
+test('naps keep being suggested after 5 or 6: nap count is information, not a limit', () => {
+  const sleeps = history({ window: () => 65, napLen: () => 35 });
+  const day = [
+    sleep(D(7, 0) - 9 * 60 * MIN, D(7, 0), 'night'),
+    sleep(D(8, 10), D(8, 45)),
+    sleep(D(9, 55), D(10, 30)),
+    sleep(D(11, 40), D(12, 15)),
+    sleep(D(13, 25), D(14, 0)),
+    sleep(D(15, 10), D(15, 45)),
+    sleep(D(16, 55), D(17, 25)),
   ];
-  const p = predict({ sleeps: [...sleeps, ...naps], baby: BABY, now: wake + 570 * MIN });
-  assert.equal(p.napsToday, 3);
-  assert.equal(p.next.kind, 'bedtime');
-  assert.equal(p.later.length, 0);
-  const bedtimes = at(2026, 10, 10, 17, 45);
-  assert.ok(p.next.at >= bedtimes && p.next.at <= at(2026, 10, 10, 20, 0), new Date(p.next.at).toString());
+  const p = predict({ sleeps: [...sleeps, ...day], baby: BABY, settings: { bedtime: '21:00' }, now: D(17, 30) });
+  assert.equal(p.napsSoFar, 6);
+  assert.equal(p.next.kind, 'nap', 'a seventh nap is offered while bedtime is 3.5 hours away');
+  assert.equal(p.next.number, 7);
+  assert.equal(p.mode, 'awake');
+  assert.ok(!p.reasons.some((r) => /typical|which is what/i.test(r) && /naps today/i.test(r)), 'no "that is enough naps" message');
 });
 
-test('when another nap would run into bedtime, bedtime comes next', () => {
+test('the next nap depends on the last wake time and nap quality, not on the nap number', () => {
   const sleeps = history();
-  const naps = [sleep(at(2026, 10, 10, 10, 0), at(2026, 10, 10, 12, 0)), sleep(at(2026, 10, 10, 14, 30), at(2026, 10, 10, 16, 30))];
-  const p = predict({ sleeps: [...sleeps, ...naps], baby: BABY, now: at(2026, 10, 10, 16, 35) });
-  assert.equal(p.napsToday, 2);
-  assert.equal(p.next.kind, 'bedtime');
-  assert.equal(p.next.skippedNap, 3);
+  const run = (len, napsBefore) => {
+    const naps = Array.from({ length: napsBefore }, (_, i) => sleep(D(8 + i, 0), D(8 + i, 20)));
+    const nap = sleep(D(12, 0), D(12, 0) + len * MIN);
+    const p = predict({ sleeps: [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), ...naps.filter((n) => n.end < D(12)), nap], baby: BABY, now: nap.end + 5 * MIN });
+    return { p, window: (p.next.at - nap.end) / MIN };
+  };
+  const short = run(20, 1);
+  const long = run(90, 1);
+  assert.ok(short.window < long.window * 0.88, `${short.window.toFixed(0)} vs ${long.window.toFixed(0)} min`);
+  assert.ok(short.p.reasons.some((r) => /short/i.test(r)));
+  const manyBefore = run(20, 3);
+  assert.equal(Math.round(manyBefore.window), Math.round(short.window), 'same last wake and nap -> same window, however many naps came before');
 });
 
-test('a configured bedtime pulls bedtime later, within reason', () => {
+test('a desired bedtime shapes the late afternoon: 8:30 PM lands near 8:30, not 9:00 or later', () => {
+  const sleeps = history({ bed: 21 * 60 + 15 }); // her recent days have drifted late
+  const wake = sleeps.filter((s) => s.kind === 'night').at(-1).end;
+  const nap1 = sleep(wake + 80 * MIN, wake + 125 * MIN);
+  const now = nap1.end + 10 * MIN;
+  const at830 = predict({ sleeps: [...sleeps, nap1], baby: BABY, settings: { bedtime: '20:30' }, now });
+  const at930 = predict({ sleeps: [...sleeps, nap1], baby: BABY, settings: { bedtime: '21:30' }, now });
+  near(bedOf(at830).at, atOnDay(nap1.start, 20, 30), 12, 'lands on 8:30');
+  near(bedOf(at930).at, atOnDay(nap1.start, 21, 30), 12, 'lands on 9:30');
+  assert.equal(at830.bedtime.source, 'chosen');
+  assert.ok(at830.reasons.some((r) => /Bedtime target is 8:30/i.test(r)));
+});
+function atOnDay(ms, h, m) {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, m).getTime();
+}
+
+test('a long stretch before bed becomes a short bridge nap, even when it is a late-numbered nap', () => {
+  const sleeps = history({ window: () => 70, napLen: () => 40 });
+  const day = [sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), sleep(D(8, 15), D(9, 0)), sleep(D(10, 10), D(10, 50)), sleep(D(12, 0), D(12, 40)), sleep(D(13, 50), D(14, 30)), sleep(D(15, 40), D(16, 20)), sleep(D(17, 30), D(18, 0))];
+  const p = predict({ sleeps: [...sleeps, ...day], baby: BABY, settings: { bedtime: '20:45' }, now: D(18, 5) });
+  assert.equal(p.napsSoFar, 6);
+  assert.equal(p.next.kind, 'nap');
+  const bridge = napsOf(p).find((n) => n.bridge);
+  assert.ok(bridge, 'a bridge nap is planned');
+  assert.ok(bridge.len >= 15 && bridge.len <= 40);
+  assert.ok(p.reasons.some((r) => /bridge nap/i.test(r)));
+  near(bedOf(p).at, D(20, 45), 12);
+});
+
+test('a short nap is not treated like a long restorative one', () => {
   const sleeps = history();
-  const wake = sleeps[sleeps.length - 1].end;
-  const naps = [sleep(wake + 115 * MIN, wake + 175 * MIN), sleep(wake + 305 * MIN, wake + 380 * MIN), sleep(wake + 525 * MIN, wake + 560 * MIN)];
-  const now = wake + 570 * MIN;
-  const learned = predict({ sleeps: [...sleeps, ...naps], baby: BABY, now });
-  const chosen = predict({ sleeps: [...sleeps, ...naps], baby: BABY, settings: { bedtimeMin: 20 * 60 }, now });
-  assert.equal(chosen.next.kind, 'bedtime');
-  assert.equal(chosen.bedtimeMin, 20 * 60);
-  assert.ok(chosen.next.at > learned.next.at + 10 * MIN, 'moves toward the chosen time');
-  assert.ok(chosen.next.at <= at(2026, 10, 10, 20, 45), 'but never past bedtime + 45 min');
+  const wake = D(11, 0);
+  const shortNap = sleep(D(10, 40), wake); // 20 minutes
+  const base = [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night')];
+  const a = predict({ sleeps: [...base, shortNap], baby: BABY, now: wake + 5 * MIN });
+  const b = predict({ sleeps: [...base, sleep(D(9, 30), wake)], baby: BABY, now: wake + 5 * MIN });
+  assert.ok(a.next.window < b.next.window - 8, `${a.next.window.toFixed(0)} vs ${b.next.window.toFixed(0)}`);
 });
 
-test('a chosen bedtime reshapes the whole remaining day, not just the last window', () => {
+test('after a rough night windows are shorter and the day says why', () => {
+  const normal = history({ night: [[0, 300], [330, 300]] });
+  const lastBed = at(2026, 10, 9, 20, 30);
+  const stripped = normal.filter((s) => !(s.kind === 'night' && s.start >= lastBed - 60 * MIN));
+  const wake = D(7);
+  const roughNight = [[0, 80], [110, 60], [200, 70], [300, 50], [380, 80], [490, 60]].map(([o, l]) => ({ start: lastBed + o * MIN, end: lastBed + (o + l) * MIN, kind: 'night', notes: '' }));
+  const fineNight = [[0, 300], [330, 300]].map(([o, l]) => ({ start: lastBed + o * MIN, end: lastBed + (o + l) * MIN, kind: 'night', notes: '' }));
+  const rough = predict({ sleeps: [...stripped, ...roughNight], baby: BABY, now: wake + 10 * MIN });
+  const fine = predict({ sleeps: [...stripped, ...fineNight], baby: BABY, now: wake + 10 * MIN });
+  assert.ok(rough.night.poor);
+  assert.equal(fine.night.poor, false);
+  assert.ok(rough.next.window < fine.next.window - 3, `${rough.next.window.toFixed(0)} vs ${fine.next.window.toFixed(0)}`);
+  assert.ok(rough.reasons.some((r) => /rough night/i.test(r)));
+});
+
+test('priorities change how tightly bedtime is held', () => {
+  const sleeps = history({ window: () => 95, napLen: () => 55 });
+  const wake = sleeps.filter((s) => s.kind === 'night').at(-1).end;
+  const args = { sleeps, baby: BABY, now: wake + 5 * MIN, settings: { bedtime: '19:30' } };
+  const protect = predict({ ...args, settings: { ...args.settings, priority: 'protect' } });
+  const cues = predict({ ...args, settings: { ...args.settings, priority: 'cues' } });
+  assert.equal(protect.priority, 'protect');
+  assert.equal(cues.priority, 'cues');
+  assert.ok(Math.abs(bedOf(protect).offset) < Math.abs(bedOf(cues).offset) + 1e-6 || Math.abs(bedOf(protect).offset) < 12);
+});
+
+test('a bedtime shift uses the stage target, not the final one', () => {
+  const sleeps = history({ bed: 22 * 60 });
+  const wake = sleeps.filter((s) => s.kind === 'night').at(-1).end;
+  const settings = { bedtime: '20:30', bedShift: { pace: 'steady', startedAt: at(2026, 10, 9), fromMin: 22 * 60 } };
+  const p = predict({ sleeps, baby: BABY, settings, now: wake + 10 * MIN });
+  assert.equal(p.bedtime.source, 'shift');
+  assert.equal(p.bedtime.goalMin, 20 * 60 + 30);
+  assert.ok(p.bedtime.bedMin > 20 * 60 + 30, 'not there yet');
+  assert.ok(p.reasons.some((r) => /step on the way/i.test(r)));
+});
+
+test('asleep in a nap that would crowd bedtime: wake-by is offered', () => {
   const sleeps = history();
-  const wake = sleeps[sleeps.length - 1].end;
-  const now = wake + 20 * MIN;
-  const learned = predict({ sleeps, baby: BABY, now });
-  const late = predict({ sleeps, baby: BABY, settings: { bedtimeMin: 20 * 60 + 15 }, now });
-  const bed = (p) => [p.next, ...p.later].find((i) => i.kind === 'bedtime').at;
-  assert.ok(bed(late) >= at(2026, 10, 10, 20, 0), new Date(bed(late)).toString());
-  assert.ok(late.next.at > learned.next.at, 'first nap shifts later too');
-});
-
-test('shortens a late nap rather than skipping it when there is still room', () => {
-  const wake = at(2026, 10, 10, 6, 45);
-  const sleeps = [sleep(at(2026, 10, 9, 19, 0), wake, 'night'), sleep(at(2026, 10, 10, 9, 0), at(2026, 10, 10, 10, 0))];
-  const p = predict({ sleeps, baby: { ...BABY, birth: at(2026, 1, 10) }, now: at(2026, 10, 10, 10, 5) }); // ~9 mo
-  // Whatever the forecast is, no nap may end later than the cap and every item is in order.
-  const items = [p.next, ...p.later];
-  for (let i = 1; i < items.length; i++) assert.ok(items[i].at >= items[i - 1].at);
-  assert.equal(items[items.length - 1].kind, 'bedtime');
-});
-
-test('asleep: expected wake from typical nap length, and a forecast afterwards', () => {
-  const sleeps = history();
-  const wake = sleeps[sleeps.length - 1].end;
-  const start = wake + 115 * MIN;
-  const p = predict({ sleeps: [...sleeps, { id: 'o', start, end: null, kind: 'nap', notes: '' }], baby: BABY, now: start + 20 * MIN });
+  const start = D(17, 20);
+  const p = predict({ sleeps: [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), { id: 'o', start, end: null, kind: 'nap', notes: '' }], baby: BABY, settings: { bedtime: '20:00' }, now: start + 20 * MIN });
   assert.equal(p.mode, 'asleep');
-  assert.equal(p.napNumber, 1);
-  near(p.expectedWake, start + 60 * MIN, 8);
-  assert.equal(p.after[0].kind, 'nap');
-  assert.equal(p.after[0].number, 2);
+  assert.equal(p.kind, 'nap');
+  assert.ok(p.wakeBy != null && p.wakeBy > start);
+  assert.ok(p.wakeBy < D(19, 30));
+  assert.ok(p.notes.some((n) => /Wake by/i.test(n)) === p.capped);
+  assert.equal(p.after[0].kind === 'nap' || p.after[0].kind === 'bedtime', true);
 });
 
-test('asleep at night: expects the usual morning wake-up', () => {
+test('asleep through the night with a wake target: waking guidance follows the range', () => {
   const sleeps = history();
-  const start = at(2026, 10, 10, 19, 0);
+  const start = at(2026, 10, 10, 20, 30);
+  const settings = { wake: { time: '08:00', range: 30 }, bedtime: '20:30' };
+  const asleep = [...sleeps, { id: 'n', start, end: null, kind: 'night', notes: '' }];
+  const early = predict({ sleeps: asleep, baby: BABY, settings, now: at(2026, 10, 11, 6, 30) });
+  assert.equal(early.mode, 'asleep');
+  assert.ok(early.wakeRange);
+  assert.equal(early.pastTarget, false);
+  assert.ok(early.notes[0].match(/Target wake 8:00 AM \(7:30 AM–8:30 AM\)/), early.notes[0]);
+  const inside = predict({ sleeps: asleep, baby: BABY, settings, now: at(2026, 10, 11, 8, 10) });
+  assert.match(inside.notes[0], /Wake by 8:30 AM to protect tonight's bedtime/);
+  const late = predict({ sleeps: asleep, baby: BABY, settings, now: at(2026, 10, 11, 8, 50) });
+  assert.equal(late.pastTarget, true);
+  assert.match(late.notes[0], /Past the .*target/);
+  assert.equal(late.wakeBy, at(2026, 10, 11, 8, 30));
+});
+
+test('waking late compresses the day instead of moving bedtime', () => {
+  const sleeps = history();
+  const settings = { bedtime: '20:30', wake: { time: '08:00', range: 30 } };
+  // Drop the generated night that ends at 7:00 today, then add our own night with a different wake.
+  const noLastNight = sleeps.filter((s) => !(s.kind === 'night' && s.start >= at(2026, 10, 9, 20, 0)));
+  const onTime = predict({ sleeps: [...noLastNight, sleep(D(8) - 11 * 60 * MIN, D(8), 'night')], baby: BABY, settings, now: D(8, 10) });
+  const late = predict({ sleeps: [...noLastNight, sleep(D(9, 40) - 13 * 60 * MIN, D(9, 40), 'night')], baby: BABY, settings, now: D(9, 50) });
+  near(bedOf(onTime).at, D(20, 30), 12);
+  near(bedOf(late).at, D(20, 30), 14, 'bedtime holds');
+  assert.ok(late.reasons.some((r) => /after the end of the .* wake range/i.test(r)));
+});
+
+test('"fell asleep early" notes shorten the windows near that time of day', () => {
+  const base = history({ window: () => 80, napLen: () => 45 });
+  const flagged = base.map((s, i) => {
+    const prev = base[i - 1];
+    if (s.kind !== 'nap' || !prev) return s;
+    const w = (s.start - prev.end) / MIN;
+    return w > 30 && w < 200 ? { ...s, flags: { early: true, planned: prev.end + (w / 0.8) * MIN } } : s;
+  });
+  const wake = D(11, 0);
+  const nap = sleep(D(10, 15), wake);
+  const prior = [sleep(D(7) - 9 * 60 * MIN, D(7), 'night')];
+  const without = predict({ sleeps: [...base, ...prior, nap], baby: BABY, now: wake + 5 * MIN });
+  const withNotes = predict({ sleeps: [...flagged, ...prior, nap], baby: BABY, now: wake + 5 * MIN });
+  assert.ok(withNotes.cues >= 4);
+  assert.ok(withNotes.next.window < without.next.window - 5, `${withNotes.next.window.toFixed(0)} vs ${without.next.window.toFixed(0)}`);
+  assert.ok(withNotes.reasons.some((r) => /fallen asleep early/i.test(r)));
+});
+
+test('asleep at night without a wake target: expects her usual morning', () => {
+  const sleeps = history();
+  const start = at(2026, 10, 10, 20, 30);
   const p = predict({ sleeps: [...sleeps, { id: 'n', start, end: null, kind: 'night', notes: '' }], baby: BABY, now: at(2026, 10, 10, 23, 0) });
   assert.equal(p.mode, 'asleep');
   assert.equal(p.kind, 'night');
-  near(p.expectedWake, at(2026, 10, 11, 6, 45), 15);
+  near(p.expectedWake, at(2026, 10, 11, 7, 0), 30);
+  assert.equal(p.after[0].kind, 'nap');
   assert.equal(p.after[0].number, 1);
 });
 
@@ -144,14 +223,21 @@ test('edge states: empty, stale, night waking', () => {
   assert.equal(predict({ sleeps: [], baby: BABY, now: TODAY }).mode, 'empty');
   const old = [sleep(at(2026, 10, 8, 10, 0), at(2026, 10, 8, 11, 0))];
   assert.equal(predict({ sleeps: old, baby: BABY, now: TODAY + 12 * 60 * MIN }).mode, 'stale');
-  const night = [sleep(at(2026, 10, 9, 19, 0), at(2026, 10, 10, 2, 30), 'night')];
+  const night = [sleep(at(2026, 10, 9, 20, 0), at(2026, 10, 10, 2, 30), 'night')];
   assert.equal(predict({ sleeps: night, baby: BABY, now: at(2026, 10, 10, 2, 45) }).mode, 'night-awake');
 });
 
-test('old history does not drive predictions for a baby who has aged', () => {
-  const old = generateHistory({ endDay: at(2026, 6, 1), days: 21 });
-  const wake = at(2026, 10, 10, 6, 45);
-  const sleeps = [...old, sleep(at(2026, 10, 9, 19, 0), wake, 'night')];
-  const p = predict({ sleeps, baby: BABY, now: wake + 30 * MIN });
+test('old history does not drive predictions for a baby who has grown out of it', () => {
+  const old = generateRhythm({ endDay: at(2026, 7, 1), days: 14, seed: 5 });
+  const wake = D(8);
+  const p = predict({ sleeps: [...old, sleep(at(2026, 10, 9, 20, 30), wake, 'night')], baby: BABY, now: wake + 20 * MIN });
   assert.equal(p.learned, null);
+});
+
+test('bedtime past or right now: bedtime is next', () => {
+  const sleeps = history();
+  const nap = sleep(D(19, 20), D(20, 5));
+  const p = predict({ sleeps: [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), nap], baby: BABY, settings: { bedtime: '20:30' }, now: D(20, 10) });
+  assert.equal(p.next.kind, 'bedtime');
+  assert.equal(p.later.length, 0);
 });

@@ -1,232 +1,256 @@
-import { MIN, HOUR, atTime, clamp, ageInMonths, fmtAge, fmtDuration, fmtMinutesAsClock, startOfDay, minutesOfDay } from './time.js';
-import { ageNorms, slotFactor } from './norms.js';
-import { buildProfile } from './analysis.js';
+import { MIN, HOUR, DAY, atTime, clamp, ageInMonths, fmtAge, fmtClock, fmtDuration, minutesOfDay, startOfDay } from './time.js';
+import { ageNorms } from './norms.js';
+import { learnRhythm, napQuality, windowPrior, napLenPrior } from './learn.js';
+import { planDay, latestWake, sweetSpotHalf, PRIORITIES, DEFAULT_PRIORITY } from './planner.js';
+import { bedtimeTarget, wakeTarget } from './shift.js';
 
-/**
- * Blend age-based norms with what we've learned about this baby into a concrete
- * plan: how many naps, how long each wake window / nap usually is, and bedtime.
- */
-function buildPlan(norms, profile, settings) {
-  const N = profile ? profile.napCount : norms.naps;
-  const w = profile ? profile.weight : 0;
-  const blend = (personal, base) => (personal == null ? base : w * personal + (1 - w) * base);
+const hourOf = (ms) => {
+  const d = new Date(ms);
+  return d.getHours() + d.getMinutes() / 60;
+};
+const pct = (x) => `${Math.round(Math.abs(x) * 100)}%`;
 
-  const windows = [];
-  const baseWindows = [];
-  for (let i = 0; i <= N; i++) {
-    const base = norms.ww * slotFactor(i, N);
-    baseWindows.push(base);
-    windows.push(clamp(blend(profile?.windows[i], base), norms.wwMin * 0.8, norms.wwMax * 1.25));
+/** Blend what we have seen of her with what's typical for her age, trusting her more as data builds. */
+function blend(est, prior, k = 4) {
+  if (!est) return prior;
+  const w = est.n / (est.n + k);
+  return w * est.minutes + (1 - w) * prior;
+}
+
+function makeCtx(rhythm, norms) {
+  const night = rhythm.night;
+  // The planner asks about the same times of day again and again; answer each quarter-hour once.
+  const memo = (fn) => {
+    const cache = new Map();
+    return (h) => {
+      const key = Math.round(h * 4);
+      if (!cache.has(key)) cache.set(key, fn(key / 4));
+      return cache.get(key);
+    };
+  };
+  return {
+    ordinaryWindow: memo((h) => clamp(blend(rhythm.windowAt(h), windowPrior(norms, h)), 0.5 * windowPrior(norms, h), 1.8 * windowPrior(norms, h))),
+    napLength: memo((h) => clamp(blend(rhythm.napLenAt(h), napLenPrior(norms, h)), 15, 120)),
+    spread: memo((h) => rhythm.windowAt(h)?.spread ?? windowPrior(norms, h) * 0.25),
+    cueAt: memo((h) => rhythm.cueAt(h)),
+    nightFactor: night.windowFactor,
+    napFlex: night.napFlex,
+  };
+}
+
+/** Where bedtime should land today: the parents' choice (maybe stepping toward it), else what she's been doing. */
+function resolveBedtime({ settings, rhythm, norms, sleeps, now }) {
+  const chosen = bedtimeTarget({ settings, sleeps, now });
+  if (chosen) {
+    return {
+      bedMin: chosen.targetMin,
+      goalMin: chosen.goalMin,
+      shift: chosen.shift,
+      source: chosen.shift && !chosen.shift.reached ? 'shift' : 'chosen',
+    };
   }
-  const napLens = [];
-  for (let i = 0; i < N; i++) napLens.push(blend(profile?.napLens[i], norms.napLen));
-
-  const bedtimeMin = clamp(settings.bedtimeMin ?? profile?.bedtimeMin ?? norms.bedtimeMin, 17.5 * 60, 22 * 60);
-  // A bedtime the parents chose is a target to build the day around, so let the windows flex more.
-  const fixedBedtime = settings.bedtimeMin != null;
-  return { N, windows, baseWindows, napLens, bedtimeMin, fixedBedtime, profile, norms };
+  if (rhythm.bedMin != null) return { bedMin: clamp(Math.round(rhythm.bedMin), 17.5 * 60, 24 * 60), source: 'learned' };
+  return { bedMin: norms.bedtimeMin, source: 'age' };
 }
 
-function napItem(number, start, end, window, extra = {}) {
-  const half = clamp(window * 0.08, 5, 15) * MIN;
-  return { kind: 'nap', number, at: start, end, len: (end - start) / MIN, window, earliest: start - half, latest: start + half, ...extra };
-}
-
-function bedtimeItem(at, window, extra = {}) {
-  const half = clamp(window * 0.08, 5, 15) * MIN;
-  return { kind: 'bedtime', at, window, earliest: at - half, latest: at + half, ...extra };
-}
-
-/**
- * Walk forward from `t0` (a wake-up) having already taken `k0` naps today,
- * producing the remaining naps and bedtime.
- *
- * The typical windows are first stretched or trimmed (a little) so that the rest
- * of the day's naps and windows land on bedtime. A nap that still would crowd
- * out bedtime is shortened, or skipped so that bedtime comes next.
- */
-function planRest(t0, k0, plan, shortNapFactor = 1) {
-  const { N, windows, napLens } = plan;
-  const items = [];
-  const bed = atTime(t0, plan.bedtimeMin);
-
-  const rawSum = windows.slice(k0).reduce((a, b) => a + b, 0);
-  const napSum = napLens.slice(k0).reduce((a, b) => a + b, 0);
-  const budget = (bed - t0) / MIN - napSum;
-  const [lo, hi] = plan.fixedBedtime ? [0.8, 1.15] : plan.profile ? [0.9, 1.05] : [0.8, 1.1];
-  const fit = rawSum > 0 && budget > 0 ? clamp(budget / rawSum, lo, hi) : 1;
-  const fitted = windows.map((w) => w * fit);
-
-  const lastWindow = fitted[N];
-  const minLast = 0.85 * lastWindow * MIN;
-  const bedAt = (t) => Math.max(t, clamp(t + lastWindow * MIN, bed - 60 * MIN, bed + 45 * MIN));
-
-  let t = t0;
-  let k = k0;
-  for (let guard = 0; guard < 8; guard++) {
-    if (k >= N) {
-      items.push(bedtimeItem(bedAt(t), lastWindow));
-      break;
-    }
-    const window = fitted[k] * (guard === 0 ? shortNapFactor : 1);
-    const start = t + window * MIN;
-    const len = napLens[Math.min(k, napLens.length - 1)] ?? 60;
-    const end = start + len * MIN;
-
-    if (bed - end < minLast) {
-      const capEnd = bed - minLast;
-      if (capEnd - start >= 25 * MIN) {
-        items.push(napItem(k + 1, start, capEnd, window, { capped: true }));
-        items.push(bedtimeItem(bed, lastWindow));
-      } else {
-        items.push(bedtimeItem(bedAt(t), lastWindow, { skippedNap: k + 1 }));
-      }
-      break;
-    }
-    items.push(napItem(k + 1, start, end, window));
-    t = end;
-    k++;
-  }
-  return { items, fit };
-}
-
-/** Number of naps already taken on the calendar day containing `ref`, walking back from index `from`. */
-function napsBefore(done, from, ref) {
+/** Naps taken since she last woke from a night sleep. Information only: it never limits the plan. */
+function napsSoFar(done, now) {
   let k = 0;
-  for (let i = from; i >= 0; i--) {
-    const s = done[i];
-    if (s.kind === 'night' || startOfDay(s.start) !== startOfDay(ref)) break;
+  for (let i = done.length - 1; i >= 0; i--) {
+    if (done[i].kind === 'night' || now - done[i].end > 20 * HOUR) break;
     k++;
   }
   return k;
 }
 
-function explainWindow(plan, k, used, fit, shortNap) {
-  const { profile, norms } = plan;
-  const lines = [];
-  const age = fmtAge(norms.ageMonths);
-  if (profile?.windows[k] != null) {
-    lines.push(
-      `Wake window of ${fmtDuration(used)}. Your last ${profile.matching} similar days average ${fmtDuration(profile.windows[k])} here; ` +
-        `typical at ${age} is ${fmtDuration(plan.baseWindows[k])}. The more days you log, the more it leans on your baby's own pattern.`,
-    );
-  } else {
-    lines.push(`Wake window of ${fmtDuration(used)}, typical at ${age}. It adapts as you log more days or import history.`);
-  }
-  if (Math.abs(fit - 1) > 0.03) {
-    const pct = Math.round(Math.abs(fit - 1) * 100);
-    lines.push(`${fit < 1 ? 'Trimmed' : 'Stretched'} about ${pct}% to fit the rest of today around a ${fmtMinutesAsClock(plan.bedtimeMin)} bedtime.`);
-  }
-  if (shortNap) {
-    lines.push(`The last nap was short (${fmtDuration(shortNap)}), so the window is shortened by about 15%.`);
-  }
-  return lines;
+function decorate(items, ctx) {
+  return items.map((i) => {
+    const half = sweetSpotHalf(ctx, i.at);
+    const w = i.kind === 'nap' ? half : clamp(half, 5, 15);
+    // The sweet spot is the best guess; windows vary, so also say when to start watching for cues.
+    const watch = Math.min(40, Math.max(25, 2 * half));
+    return { ...i, earliest: i.at - w * MIN, latest: i.at + w * MIN, ...(i.kind === 'nap' ? { watchFrom: i.at - watch * MIN } : {}) };
+  });
 }
 
 /**
- * Main entry point. Pure function of the log, so it is easy to test.
+ * Main entry point. A pure function of the log and settings, so it is easy to test.
  *
  *   baby:     { name, birth: epoch ms }
- *   settings: { bedtimeMin?: minutes after midnight } (omit to learn it)
+ *   settings: { bedtime, bedShift, wake, wakeShift, priority } (all optional)
+ *
+ * What it does not do: use a nap count as a limit or a goal. The next suggestion is built from
+ * when she last woke, how good the last nap was, the time of day, how the night went, and where
+ * bedtime should land. Naps keep being suggested until another one no longer makes sense.
  */
 export function predict({ sleeps, baby, settings = {}, now = Date.now() }) {
-  const done = sleeps.filter((s) => s.end != null).sort((a, b) => a.start - b.start);
-  const ongoing = sleeps.find((s) => s.end == null);
   const ageMonths = ageInMonths(baby.birth, now);
   const norms = ageNorms(ageMonths);
-  const profile = buildProfile(sleeps, { now });
-  const plan = buildPlan(norms, profile, settings);
+  const rhythm = learnRhythm(sleeps, { now, maxGapMin: Math.max(240, norms.ww * 2) });
+  const policy = PRIORITIES[settings.priority] ?? PRIORITIES[DEFAULT_PRIORITY];
+  const ctx = makeCtx(rhythm, norms);
+  const bed = resolveBedtime({ settings, rhythm, norms, sleeps, now });
+  const wake = wakeTarget({ settings, sleeps, now });
+
   const base = {
     ageMonths,
-    plan,
-    learned: profile ? { days: profile.days, matching: profile.matching } : null,
-    napsExpected: plan.N,
-    bedtimeMin: plan.bedtimeMin,
+    priority: policy.key,
+    learned: rhythm.windowCount >= 12 ? { days: Math.max(rhythm.days, Math.round(rhythm.windowCount / 6)), windows: rhythm.windowCount } : null,
+    bedtimeMin: bed.bedMin,
+    bedtime: bed,
+    wake,
+    night: rhythm.night,
+    cues: rhythm.cueCount,
   };
 
-  if (ongoing) return { ...base, ...predictAsleep(ongoing, done, plan, now) };
-  if (!done.length) return { ...base, mode: 'empty' };
+  const done = sleeps.filter((s) => s.end != null && s.end > s.start).sort((a, b) => a.start - b.start);
+  const ongoing = sleeps.filter((s) => s.end == null).sort((a, b) => a.start - b.start)[0];
+  const env = { now, norms, rhythm, policy, ctx, bed, wake, done };
+
+  if (ongoing) return { ...base, ...predictAsleep(ongoing, env) };
+  if (!done.length) return { ...base, mode: 'empty', napsSoFar: 0 };
 
   const last = done[done.length - 1];
-  if (now - last.end > 14 * HOUR) return { ...base, mode: 'stale', lastEnd: last.end };
+  if (now - last.end > 14 * HOUR) return { ...base, mode: 'stale', lastEnd: last.end, napsSoFar: 0 };
   if (last.kind === 'night' && minutesOfDay(last.end) < 4.5 * 60) {
-    return { ...base, mode: 'night-awake', awakeSince: last.end };
+    return { ...base, mode: 'night-awake', awakeSince: last.end, napsSoFar: 0 };
   }
+  return { ...base, ...predictAwake(last, env) };
+}
 
-  const napsToday = last.kind === 'nap' ? napsBefore(done, done.length - 1, last.start) : 0;
+function predictAwake(last, { now, norms, rhythm, policy, ctx, bed, wake, done }) {
+  const t0 = last.end;
+  const prevKind = last.kind === 'night' ? 'night' : 'nap';
+  const prevLen = prevKind === 'nap' ? (last.end - last.start) / MIN : null;
+  const k = napsSoFar(done, now);
+  const bedMs = atTime(t0, bed.bedMin);
 
-  // A short nap means baby is tired sooner.
-  let factor = 1;
-  let shortNap = 0;
-  if (last.kind === 'nap') {
-    const len = (last.end - last.start) / MIN;
-    const expected = plan.napLens[Math.min(napsToday - 1, plan.napLens.length - 1)] ?? 60;
-    if (len < Math.min(45, 0.7 * expected)) {
-      factor = 0.85;
-      shortNap = len;
-    }
-  }
-
-  const { items, fit } = planRest(last.end, napsToday, plan, factor);
+  const plan = planDay({ t0, bed: bedMs, prevLen, prevKind, napsDone: k, ctx, policy });
+  const items = decorate(plan.items, ctx);
   const next = items[0];
+  const h = hourOf(t0);
   const reasons = [];
+
   if (next.kind === 'nap') {
-    reasons.push(...explainWindow(plan, napsToday, next.window, fit, shortNap));
-    if (next.capped) {
-      reasons.push(`This nap is capped at ${fmtDuration(next.len)} so the last stretch before bedtime isn't squeezed.`);
+    const ordinary = ctx.ordinaryWindow(h);
+    const learned = rhythm.windowAt(h);
+    reasons.push(
+      `Next nap about ${fmtDuration(next.window)} after waking at ${fmtClock(t0)}. Her usual window around now is ${fmtDuration(ordinary)} ` +
+        (learned ? `(from ${rhythm.windowCount} recent windows).` : `(typical at ${fmtAge(norms.ageMonths)}; it adapts as you log more).`),
+    );
+    if (prevKind === 'nap') {
+      const q = napQuality(prevLen);
+      if (q < 0.95) reasons.push(`The last nap was short (${fmtDuration(prevLen)}), so the window is about ${pct(1 - q)} shorter than usual.`);
+      else if (prevLen >= 75) reasons.push(`The last nap was a long one (${fmtDuration(prevLen)}), so the window isn't shortened.`);
     }
   } else {
-    if (next.skippedNap) {
-      reasons.push(`There isn't room for another nap before bedtime without pushing it too late, so bedtime is next.`);
-    } else if (napsToday >= plan.N) {
-      reasons.push(`That's ${napsToday} ${napsToday === 1 ? 'nap' : 'naps'} today, which is what's typical, so bedtime is next.`);
+    reasons.push(`Bedtime is next: another nap wouldn't leave a sensible stretch before ${fmtClock(next.desired)}.`);
+  }
+
+  if (rhythm.night.poor) {
+    const n = rhythm.night;
+    reasons.push(
+      `Rough night (longest stretch ${fmtDuration(n.last.longest)}${n.usual ? `, usually ${fmtDuration(n.usual.longest)}` : ''}): windows are about ${pct(1 - n.windowFactor)} shorter today, and an extra nap is easier to add.`,
+    );
+  }
+  if (rhythm.cueCount >= 2 && ctx.cueAt(h) < 0.97) {
+    reasons.push(`She has fallen asleep early ${rhythm.cueCount} times lately, so windows around now are about ${pct(1 - ctx.cueAt(h))} shorter.`);
+  }
+
+  const bedItem = items[items.length - 1];
+  reasons.push(
+    bed.source === 'shift'
+      ? `Bedtime target today is ${fmtClock(bedMs)}, a step on the way to ${fmtClock(atTime(t0, bed.goalMin))} (${bed.shift.step} min every ${bed.shift.hold} days, once she's settling near each target).`
+      : bed.source === 'chosen'
+        ? `Bedtime target is ${fmtClock(bedMs)}.`
+        : bed.source === 'learned'
+          ? `Bedtime is about ${fmtClock(bedMs)}, where it has been lately. Choose a bedtime in Settings to steer it.`
+          : `Bedtime is about ${fmtClock(bedMs)}, typical for her age. Choose a bedtime in Settings to steer it.`,
+  );
+  if (Math.abs(plan.windowPct) >= 0.04) {
+    reasons.push(`The rest of the day is ${plan.windowPct > 0 ? 'stretched' : 'trimmed'} about ${pct(plan.windowPct)}, mostly in the late afternoon, to land on bedtime.`);
+  }
+  const bridge = items.find((i) => i.bridge);
+  if (bridge) reasons.push(`A short bridge nap (about ${fmtDuration(bridge.len)}) keeps the last stretch awake before bed from running too long.`);
+  if (Math.abs(bedItem.offset) >= 15) {
+    reasons.push(`With ${policy.label.toLowerCase()} as the priority, bedtime is expected to land about ${fmtDuration(Math.abs(bedItem.offset))} ${bedItem.offset > 0 ? 'after' : 'before'} the target.`);
+  }
+  if (wake && prevKind === 'night') {
+    const morning = startOfDay(t0);
+    const high = morning + wake.highMin * MIN;
+    if (t0 > high) {
+      reasons.push(`She woke ${fmtDuration((t0 - high) / MIN)} after the end of the ${fmtClock(morning + wake.lowMin * MIN)}–${fmtClock(high)} wake range. The day is compressed rather than moved later, so bedtime stays put.`);
     }
-    reasons.push(...explainWindow(plan, plan.N, next.window, fit, 0));
   }
 
   return {
-    ...base,
     mode: 'awake',
-    awakeSince: last.end,
-    napsToday,
+    awakeSince: t0,
+    prevLen,
+    prevKind,
+    napsSoFar: k,
     next,
     later: items.slice(1),
     reasons,
+    plan: { ok: plan.ok, windowPct: plan.windowPct, landing: plan.landing },
   };
 }
 
-function predictAsleep(ongoing, done, plan, now) {
+function predictAsleep(ongoing, { now, norms, rhythm, policy, ctx, bed, wake, done }) {
   const elapsed = (now - ongoing.start) / MIN;
   const out = { mode: 'asleep', kind: ongoing.kind, since: ongoing.start, elapsed };
+  const before = done.filter((s) => s.end <= ongoing.start);
 
   if (ongoing.kind === 'night') {
-    const wakeMin = plan.profile?.wakeMin ?? 7 * 60;
-    let wake = atTime(ongoing.start, wakeMin);
-    while (wake < ongoing.start + 4 * HOUR) wake += 24 * HOUR;
-    return { ...out, expectedWake: wake, after: planRest(wake, 0, plan).items };
+    const wakeMin = wake?.targetMin ?? rhythm.wakeMin ?? 7 * 60;
+    let expectedWake = atTime(ongoing.start, wakeMin);
+    while (expectedWake < ongoing.start + 3 * HOUR) expectedWake += DAY;
+    const bedMs = atTime(expectedWake, bed.bedMin);
+
+    let range = null;
+    let wakeBy = null;
+    if (wake) {
+      const day = startOfDay(expectedWake);
+      range = { targetMs: day + wake.targetMin * MIN, lowMs: day + wake.lowMin * MIN, highMs: day + wake.highMin * MIN };
+      wakeBy = range.highMs;
+    } else if (policy.wakeBy) {
+      wakeBy = latestWake({ kind: 'night', from: Math.max(now, expectedWake - 90 * MIN), around: expectedWake, bed: bedMs, ctx, policy });
+    }
+    const resume = Math.max(expectedWake, now);
+    const after = decorate(planDay({ t0: resume, bed: bedMs, prevKind: 'night', napsDone: 0, ctx, policy }).items, ctx);
+    const notes = [];
+    if (range) {
+      if (now > range.highMs) notes.push(`Past the ${fmtClock(range.lowMs)}–${fmtClock(range.highMs)} target. Waking her now protects tonight's ${fmtClock(bedMs)} bedtime.`);
+      else if (now >= range.lowMs) notes.push(`In the target wake range. Wake by ${fmtClock(range.highMs)} to protect tonight's bedtime.`);
+      else notes.push(`Target wake ${fmtClock(range.targetMs)} (${fmtClock(range.lowMs)}–${fmtClock(range.highMs)}). Let her sleep until then.`);
+    } else if (wakeBy) {
+      notes.push(`Wake by ${fmtClock(wakeBy)} to keep tonight's bedtime near ${fmtClock(bedMs)}.`);
+    }
+    return {
+      ...out,
+      napsSoFar: 0,
+      expectedWake,
+      wakeBy,
+      wakeRange: range,
+      pastTarget: Boolean(range && now > range.highMs),
+      after,
+      notes,
+    };
   }
 
-  const before = done.filter((s) => s.end <= ongoing.start);
-  const k = napsBefore(before, before.length - 1, ongoing.start);
-  const len = plan.napLens[Math.min(k, plan.napLens.length - 1)] ?? 60;
-  let expectedWake = ongoing.start + len * MIN;
-
-  // Protect bedtime: suggest waking by a cap if the nap would otherwise crowd it out.
-  const bed = atTime(ongoing.start, plan.bedtimeMin);
-  const cap = bed - 0.85 * plan.windows[plan.N] * MIN;
-  let wakeBy = null;
-  if (cap < expectedWake && cap > ongoing.start + 25 * MIN) {
-    wakeBy = cap;
-    expectedWake = cap;
-  }
-
+  const k = napsSoFar(before, ongoing.start);
+  const typicalLen = ctx.napLength(hourOf(ongoing.start)) * policy.napBias;
+  let expectedWake = ongoing.start + typicalLen * MIN;
+  const bedMs = atTime(ongoing.start, bed.bedMin);
+  const wakeBy = policy.wakeBy ? latestWake({ start: ongoing.start, from: now, around: expectedWake, bed: bedMs, ctx, policy, napsDone: k }) : null;
+  const capped = wakeBy != null && wakeBy < expectedWake;
+  if (capped) expectedWake = wakeBy;
   const resume = Math.max(expectedWake, now);
-  return {
-    ...out,
-    napNumber: k + 1,
-    typicalLen: len,
-    expectedWake,
-    wakeBy,
-    after: planRest(resume, k + 1, plan).items,
-  };
+  const after = decorate(
+    planDay({ t0: resume, bed: bedMs, prevLen: (resume - ongoing.start) / MIN, prevKind: 'nap', napsDone: k + 1, ctx, policy }).items,
+    ctx,
+  );
+  const notes = [];
+  if (capped) notes.push(`Wake by ${fmtClock(wakeBy)} to protect tonight's ${fmtClock(bedMs)} bedtime.`);
+  return { ...out, napsSoFar: k, napNumber: k + 1, typicalLen, expectedWake, wakeBy, capped, after, notes };
 }

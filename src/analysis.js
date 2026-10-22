@@ -46,8 +46,15 @@ export function buildDays(sleeps) {
       ((s.kind === 'night' && s.start - last.end < 3 * HOUR) ||
         // A short early-morning "nap" right after a night waking is still night.
         (s.kind === 'nap' && s.start - last.end < 90 * MIN && minutesOfDay(s.start) < 7 * 60));
-    if (continuesNight) last.end = Math.max(last.end, s.end);
-    else items.push({ kind: s.kind, start: s.start, end: s.end });
+    const minutes = (s.end - s.start) / MIN;
+    if (continuesNight) {
+      last.end = Math.max(last.end, s.end);
+      last.chunks += 1;
+      last.asleep += minutes;
+      last.longest = Math.max(last.longest, minutes);
+    } else {
+      items.push({ kind: s.kind, start: s.start, end: s.end, chunks: 1, asleep: minutes, longest: minutes });
+    }
   }
 
   const days = [];
@@ -59,7 +66,16 @@ export function buildDays(sleeps) {
         cur.sane = isSane(cur);
         days.push(cur);
       }
-      cur = { date: startOfDay(it.end), wake: it.end, naps: [], bedtime: null, sane: false };
+      // `night` describes how the night before this day went: how many separate stretches, how long
+      // she slept in total, and her longest stretch. Used to spot a rough night.
+      cur = {
+        date: startOfDay(it.end),
+        wake: it.end,
+        naps: [],
+        bedtime: null,
+        sane: false,
+        night: { start: it.start, end: it.end, chunks: it.chunks, asleep: it.asleep, longest: it.longest },
+      };
     } else if (cur) {
       cur.naps.push(it);
     }

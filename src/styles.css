@@ -651,3 +651,54 @@ textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85rem;
 }
+
+/* ---------- schedule settings ---------- */
+
+.card h3 {
+  font-size: 0.95rem;
+  margin: 18px 0 2px;
+}
+
+.priority {
+  border: 0;
+  padding: 0;
+  margin: 0 0 4px;
+}
+
+.priority legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+
+.opt,
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 0;
+  min-height: 44px;
+}
+
+.opt input,
+.check input {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  align-items: end;
+}
+
+.btn.small {
+  width: 100%;
+}
+
+.sub + .sub {
+  margin-top: 4px;
+}
