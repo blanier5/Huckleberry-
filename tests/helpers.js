@@ -74,3 +74,56 @@ export function toHuckleberryCSV(sleeps) {
   });
   return lines.join('\n') + '\n';
 }
+
+/**
+ * Synthetic days with a variable number of naps (the schedule is driven by wake windows, not by a
+ * nap count), a bedtime, and a night made of one or more stretches.
+ *
+ *   window(prevLen, hour) -> minutes awake before the next nap (default: 80 x nap-quality)
+ *   napLen(hour, i)       -> minutes
+ *   night                 -> [[startOffsetMin, lenMin], ...] from bedtime
+ */
+export function generateRhythm({
+  endDay,
+  days = 14,
+  seed = 2,
+  wake = 7 * 60,
+  bed = 20 * 60 + 30,
+  window = (prevLen) => 80 * quality(prevLen),
+  napLen = (hour, i) => [45, 25, 60, 35, 50, 20, 40][i % 7],
+  night = [[0, 300], [330, 300]], // 20:30 -> 07:00, so the day starts when the night ends
+  jitter = 6,
+} = {}) {
+  const rand = rng(seed);
+  const j = (v, s = jitter) => v + (rand() * 2 - 1) * s;
+  const sleeps = [];
+  const dayMs = 24 * 60 * MIN;
+  const hourOf = (ms) => new Date(ms).getHours() + new Date(ms).getMinutes() / 60;
+  for (let d = days; d >= 1; d--) {
+    const midnight = endDay - d * dayMs;
+    let t = midnight + j(wake, 8) * MIN;
+    let prevLen = null;
+    for (let i = 0; i < 12; i++) {
+      const w = j(window(prevLen ?? 60, hourOf(t)));
+      const start = t + w * MIN;
+      const len = Math.max(8, j(napLen(hourOf(start), i), 5));
+      if (start + len * MIN > midnight + (bed - 40) * MIN) break;
+      sleeps.push({ start: Math.round(start), end: Math.round(start + len * MIN), kind: 'nap', notes: '' });
+      t = start + len * MIN;
+      prevLen = len;
+    }
+    const bedtime = midnight + j(bed, 8) * MIN;
+    for (const [off, len] of night) {
+      sleeps.push({ start: Math.round(bedtime + off * MIN), end: Math.round(bedtime + (off + len) * MIN), kind: 'night', notes: '' });
+    }
+  }
+  return sleeps;
+}
+
+// Same curve as src/learn.js napQuality, repeated here so the generator doesn't import what it tests.
+function quality(len) {
+  const pts = [[10, 0.62], [20, 0.74], [30, 0.85], [40, 0.93], [50, 0.98], [60, 1.0], [90, 1.03], [120, 1.05]];
+  if (len <= pts[0][0]) return pts[0][1];
+  for (let i = 1; i < pts.length; i++) if (len <= pts[i][0]) return pts[i - 1][1] + ((pts[i][1] - pts[i - 1][1]) * (len - pts[i - 1][0])) / (pts[i][0] - pts[i - 1][0]);
+  return pts[pts.length - 1][1];
+}

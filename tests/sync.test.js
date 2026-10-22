@@ -397,3 +397,40 @@ test('data saved by the first version of the app is upgraded and syncs', { skip 
   assert.ok(store.state.sleeps.every((s) => /^s\d+$/.test(s.id) && s.updatedAt > 0));
   assert.equal(JSON.parse(storage.getItem('napberry:v1')).version, 2, 'upgrade is saved');
 });
+
+test('schedule settings and "fell asleep early" notes travel between phones', { skip }, async () => {
+  await fresh();
+  const a = phone(backend, T0);
+  a.store.setBaby(MIA);
+  a.store.setSettings({ bedtime: '20:30', priority: 'protect', wake: { time: '08:00', range: 30 }, bedShift: { pace: 'steady', startedAt: T0, fromMin: 21 * 60 } });
+  const invite = await a.sync.enable(setup);
+  const b = phone(backend, T0);
+  await b.sync.join(invite);
+  assert.equal(b.store.state.settings.bedtime, '20:30');
+  assert.equal(b.store.state.settings.priority, 'protect');
+  assert.deepEqual(b.store.state.settings.wake, { time: '08:00', range: 30 });
+  assert.equal(b.store.state.settings.bedShift.fromMin, 21 * 60);
+
+  a.tick(10);
+  a.store.startSleep('nap', a.clock.now, { early: true, planned: a.clock.now + 25 * MIN });
+  a.tick(40);
+  a.store.endSleep();
+  await a.sync.syncNow();
+  await b.sync.syncNow();
+  assert.deepEqual(b.store.state.sleeps[0].flags, { early: true, planned: T0 + 35 * MIN });
+});
+
+test('the profile already on a server (only a bedtime) joins a phone with no data loss', { skip }, async () => {
+  await fresh();
+  const old = phone(backend, T0);
+  old.store.setBaby(MIA);
+  old.store.setSettings({ bedtime: '22:00' });
+  old.store.mergeSleeps([nap(9, 0), nap(12, 0)]);
+  const invite = await old.sync.enable(setup);
+  const fresh2 = phone(backend, T0 + 60 * MIN);
+  await fresh2.sync.join(invite);
+  assert.equal(fresh2.store.state.settings.bedtime, '22:00');
+  assert.equal(fresh2.store.state.settings.priority, null);
+  assert.equal(fresh2.store.state.sleeps.length, 2);
+  assert.equal(old.store.state.sleeps.length, 2);
+});

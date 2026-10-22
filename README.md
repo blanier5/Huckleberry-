@@ -35,12 +35,26 @@ The importer expects the usual export columns, `Start, End, Duration, Type, …,
 
 ## How the recommendations work
 
-1. **Start from age.** Typical wake windows, nap counts and nap lengths are interpolated by age in months (`src/norms.js`). Windows grow through the day: shortest after the morning wake-up, longest before bed.
-2. **Learn the baby.** From the last ~14 complete days it takes the median wake window for each slot of the day (first nap, second nap, … bedtime), nap lengths, nap count and bedtime. Night wakings are folded into the night so they never look like wake windows, and days with logging gaps are ignored. The more matching days, the more it trusts the baby's own numbers over the age norm.
-3. **Adjust for today.** A short last nap pulls the next window in about 15%. The remaining windows are stretched or trimmed a little so the day lands on bedtime (more freely if you set a bedtime yourself). If another nap would run into bedtime it is capped, or skipped so bedtime comes next.
-4. **Say why.** Each suggestion lists the numbers it used.
+Nap count is **never** a goal or a limit. At young ages it swings a lot (4 to 7 naps a day is normal for a 2-month-old), so Napberry shows "5 naps so far" as information only and keeps suggesting naps until another one no longer makes sense before bedtime.
 
-Predictions are most meaningful from about 2 months. History older than 30 days is not used to learn, so a baby who has grown out of an old pattern isn't held to it.
+The next suggestion is built from four things:
+
+1. **When she last woke.** Her usual wake window for that time of day, learned from the last three weeks of *every* day (not matched to nap number), blended with what's typical for her age until there's enough history. The sweet spot is the best guess; windows are irregular, so it also says when to start watching for sleepy cues.
+2. **How good the last nap was.** A nap under about 30 to 40 minutes isn't restorative, so the next window is shorter (a 20-minute nap leads to roughly a 25% shorter window than a normal one). Once a nap is a normal length the effect levels off.
+3. **How the night went.** If last night was rougher than her usual nights (less total sleep, a shorter longest stretch, or more broken up), windows are about 5 to 9% shorter that day and an extra nap is easier to add.
+4. **Where bedtime should land.** For every possible number of naps, Napberry asks how much her usual windows and nap lengths would have to bend to land on bedtime, and picks the count that bends them least. The first window stays close to natural; the **late afternoon** is where the bending happens. If the alternative is a long stretch awake before bed, the last nap becomes a short **bridge nap** (about 20 to 40 minutes), even if it is nap #6 or #7.
+
+Every suggestion has a "Why this time?" panel listing exactly what it used.
+
+### Schedule settings (Settings tab)
+
+- **What matters most.** *Protect bedtime* holds bedtime tightly and bends the day to it. *Maximize total sleep* lets naps run their course and offers extra naps, with bedtime free to drift about an hour. *Build a consistent morning wake time* anchors the day to your wake target. *Follow baby cues* stays close to her natural windows and lets bedtime land within about an hour of the target.
+- **Desired bedtime.** For example 8:30 PM. The late afternoon is shaped to land on it instead of wherever her windows happen to lead. Leave it unset to use where bedtime has been lately.
+- **Move bedtime gradually.** Instead of one jump, the target moves toward your desired bedtime in small steps: *10 min every 3 days*, *15 min every 3 days* or *15 min every 2 days*. A step only happens once she has actually gone down near the current target for that many days; if she can't keep up, the target eases back instead of racing ahead. Works for earlier or later. "Starting from" is filled in for you and can be changed.
+- **Morning wake target with a range.** For example 8:00 AM &plusmn; 30 minutes, meaning 7:30 to 8:30 is fine. While she is asleep past the range, Napberry says *"Wake by 8:30 AM to protect tonight's bedtime"* instead of pushing the whole day later. If she wakes late, the day is compressed and bedtime stays put. You can also work toward the wake time gradually.
+- **Fell asleep early.** If she drops off before the suggested time, tap **Fell asleep early** instead of just *Start nap*. Napberry records when it had suggested, and learns that her windows around that time of day run shorter, instead of treating it as a one-off.
+
+Napberry gives general guidance, not medical advice. Predictions are most meaningful from about 2 months, and at young ages windows vary a lot from day to day, which is why suggestions come with a range and a "watch for cues" time.
 
 ## Sync between phones (optional)
 
@@ -57,6 +71,8 @@ It uses **your own free Supabase project** as the shared memory (Napberry has no
 
 **iPhone note.** A Home Screen app on iOS does not share storage with Safari, so one added from Safari starts empty. That's fine with sync: open it, paste the invite on the welcome screen, and everything appears.
 
+**Updating the database (one paste, only when a release says so).** Newer versions add the "fell asleep early" notes, which need one extra column. Open Supabase, go to SQL Editor, paste the current `supabase/setup.sql` and Run it again. It's safe to repeat and keeps all your data. Until you do, everything still works; those notes just stay on the phone that recorded them.
+
 **How it behaves.** Napberry always works offline: changes save on the phone first and upload when there's a connection (the little dot by the age shows green, grey while syncing, or orange when offline). If two phones edit the same sleep, the most recent edit wins. If both start a nap before seeing each other's, the first one is kept. Deleting a sleep deletes it everywhere.
 
 **Who can see the data.** Only people who have the invite. It holds the project URL, the public key and a long random family code (128 bits). The database tables are locked so the public key can't read them directly; the only way in is the two functions in `setup.sql`, and each needs the family code. Anyone with the invite can read and edit your baby's name, birth date, sleep times and notes, so share it like a password. It's stored in *your* Supabase project, not mine. To cut off a phone or rotate the code: tap **Turn off here** on every phone, turn sync on again on one (it makes a new family code), re-invite the others, then delete the old rows in the Supabase table editor.
@@ -72,8 +88,12 @@ Everything is stored in the browser's local storage on **this device**, plus you
 ```
 index.html, manifest.webmanifest, sw.js   app shell, PWA manifest, offline cache
 src/app.js         UI: views, dialogs, events
-src/predict.js     recommendation engine (pure function of the log)
-src/analysis.js    nap/night classification, day building, learned profile
+src/predict.js     builds a prediction from the log and settings (pure function)
+src/planner.js     fits naps and a bridge nap between her last wake and bedtime
+src/learn.js       her rhythm by time of day, nap quality, rough nights, early notes
+src/shift.js       gradual bedtime / wake-time shifting and the wake range
+src/settings.js    the schedule settings and their validation
+src/analysis.js    nap/night classification, day building
 src/norms.js       age-based wake windows
 src/huckleberry.js, src/csv.js   CSV import
 src/store.js       local-first storage: merge/dedupe, change tracking, backup

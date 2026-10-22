@@ -3,6 +3,8 @@ import { predict } from './predict.js';
 import { groupByDay, classifySleep } from './analysis.js';
 import { parseHuckleberryCSV } from './huckleberry.js';
 import { createSync, parseInvite } from './sync.js';
+import { PRIORITIES } from './planner.js';
+import { PACES, RANGES, DEFAULT_PACE, recentBedtime, recentWake } from './shift.js';
 import {
   MIN,
   startOfDay,
@@ -22,7 +24,7 @@ import {
 
 const store = createStore();
 const sync = createSync({ store });
-const ui = { tab: 'today', historyDays: 14, whyOpen: false, quiet: false, dirty: false, preview: null, joining: null, joinText: '' };
+const ui = { tab: 'today', historyDays: 14, whyOpen: false, quiet: false, dirty: false, preview: null, joining: null, joinText: '', prevBedtime: null };
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) =>
@@ -44,8 +46,7 @@ const TABS = [
 
 function prediction(now = Date.now()) {
   const { baby, settings, sleeps } = store.state;
-  const bedtimeMin = settings.bedtime ? parseHHMM(settings.bedtime) : null;
-  return predict({ sleeps, baby, settings: bedtimeMin == null ? {} : { bedtimeMin }, now });
+  return predict({ sleeps, baby, settings, now });
 }
 
 /* ------------------------------------------------------------------ */
@@ -134,7 +135,7 @@ function sleepRow(s, now, groupDate) {
   return `<li><button type="button" class="row" data-action="edit" data-id="${esc(s.id)}">
     <span class="dot ${s.kind === 'night' ? 'night' : ''}"></span>
     <span class="grow"><span class="title">${s.kind === 'night' ? 'Night sleep' : 'Nap'}</span><br>
-    <span class="meta">${range}${s.notes ? ` · ${esc(s.notes)}` : ''}</span></span>
+    <span class="meta">${range}${s.flags?.early ? ' · fell asleep early' : ''}${s.notes ? ` · ${esc(s.notes)}` : ''}</span></span>
     <span class="end">${fmtDuration(minutes)}</span></button></li>`;
 }
 
@@ -142,11 +143,13 @@ function planRows(items) {
   return items
     .map((i) => {
       if (i.kind === 'bedtime') {
-        const note = i.skippedNap ? 'Skips nap ' + i.skippedNap + ' to protect bedtime' : '';
-        return `<li><div class="row"><span class="dot bed"></span><span class="grow"><span class="title">Bedtime</span>${note ? `<br><span class="meta">${note}</span>` : ''}</span><span class="end">${fmtClock(i.at)}</span></div></li>`;
+        const off = Math.round(i.offset);
+        const note =
+          Math.abs(off) >= 10 ? `Target ${fmtClock(i.desired)}; expected about ${fmtDuration(Math.abs(off))} ${off > 0 ? 'later' : 'earlier'}` : `On target for ${fmtClock(i.desired)}`;
+        return `<li><div class="row"><span class="dot bed"></span><span class="grow"><span class="title">Bedtime</span><br><span class="meta">${note}</span></span><span class="end">${fmtClock(i.at)}</span></div></li>`;
       }
-      const note = i.capped ? 'Keep it short to protect bedtime' : `about ${fmtDuration(i.len)}`;
-      return `<li><div class="row"><span class="dot"></span><span class="grow"><span class="title">Nap ${i.number}</span><br><span class="meta">${note}</span></span><span class="end">${fmtClock(i.at)}</span></div></li>`;
+      const note = i.bridge ? `Short bridge nap, about ${fmtDuration(i.len)}, so bedtime isn't far off` : `about ${fmtDuration(i.len)}`;
+      return `<li><div class="row"><span class="dot"></span><span class="grow"><span class="title">Nap ${i.number}${i.bridge ? ' · bridge' : ''}</span><br><span class="meta">${note}</span></span><span class="end">${fmtClock(i.at)}</span></div></li>`;
     })
     .join('');
 }
@@ -177,11 +180,13 @@ function viewToday() {
 
   if (p.mode === 'asleep') {
     const night = p.kind === 'night';
-    const expect = night
-      ? `Usually wakes around ${fmtClock(p.expectedWake)}.`
-      : p.wakeBy
-        ? `Nap ${p.napNumber} usually runs ${fmtDuration(p.typicalLen)}. Aim to wake by ${fmtClock(p.wakeBy)} to protect bedtime.`
-        : `Nap ${p.napNumber} usually runs ${fmtDuration(p.typicalLen)}, so around ${fmtClock(p.expectedWake)}.`;
+    const lines = night
+      ? p.wakeRange
+        ? []
+        : [`Usually wakes around ${fmtClock(p.expectedWake)}.`]
+      : [`Nap ${p.napNumber} usually runs about ${fmtDuration(p.typicalLen)}${p.capped ? '' : `, so around ${fmtClock(p.expectedWake)}`}.`];
+    lines.push(...(p.notes ?? []));
+    const expect = lines.map((l) => esc(l)).join('<br>');
     out.push(`
       <section class="hero asleep" aria-label="Sleep in progress">
         <div class="eyebrow">${night ? 'Night sleep' : 'Napping'} since ${fmtClock(p.since)}</div>
@@ -199,14 +204,16 @@ function viewToday() {
     const isNap = next.kind === 'nap';
     out.push(`
       <section class="hero" aria-label="Next sleep">
-        <div class="eyebrow">Awake for ${fmtDuration((now - p.awakeSince) / MIN)} · since ${fmtClock(p.awakeSince)}</div>
-        <div class="label">${isNap ? `Next nap${p.napsExpected > 1 ? ` (${next.number} of ${p.napsExpected})` : ''}` : 'Bedtime'}</div>
+        <div class="eyebrow">Awake for ${fmtDuration((now - p.awakeSince) / MIN)} · since ${fmtClock(p.awakeSince)}${p.napsSoFar ? ` · ${p.napsSoFar} ${p.napsSoFar === 1 ? 'nap' : 'naps'} so far` : ''}</div>
+        <div class="label">${isNap ? (next.bridge ? 'Next nap · short bridge nap' : 'Next nap') : 'Bedtime'}</div>
         <div class="big">${fmtClock(next.at)}</div>
         <p class="status ${t.late ? 'late' : ''}">${t.text}</p>
         <p class="sub">Sweet spot ${fmtClock(next.earliest)} – ${fmtClock(next.latest)}</p>
+        ${isNap && next.watchFrom && now < next.watchFrom ? `<p class="sub">Watch for sleepy cues from ${fmtClock(next.watchFrom)}</p>` : ''}
         <div class="cta"><button type="button" class="btn on-hero" data-action="start" data-kind="${isNap ? 'nap' : 'night'}">${isNap ? 'Start nap' : 'Start bedtime'}</button></div>
         <div class="links">
           <button type="button" class="link" data-action="start-at" data-kind="${isNap ? 'nap' : 'night'}">Started earlier…</button>
+          ${isNap && now < next.earliest - 5 * MIN ? '<button type="button" class="link" data-action="start-early">Fell asleep early</button>' : ''}
           <button type="button" class="link" data-action="start" data-kind="${isNap ? 'night' : 'nap'}">${isNap ? 'Log night sleep instead' : 'Log a nap instead'}</button>
         </div>
       </section>
@@ -305,11 +312,107 @@ function viewSyncCard() {
     </section>`;
 }
 
-function viewSettings() {
-  const { baby, settings, sleeps } = store.state;
-  const fixed = Boolean(settings.bedtime);
+
+const clockOf = (minutes) => fmtMinutesAsClock(minutes);
+
+function shiftStatus(sh, goalMin) {
+  if (!sh) return '';
+  if (sh.reached) return `Reached ${clockOf(goalMin)}. Napberry will keep landing there.`;
+  const steps = `${sh.stepsLeft} ${sh.stepsLeft === 1 ? 'step' : 'steps'}`;
+  return (
+    `Today's target is ${clockOf(sh.targetMin)}, ${steps} (${sh.step} min each) from ${clockOf(goalMin)}. ` +
+    `${sh.hits} of ${sh.hold} days on target before the next step.` +
+    (sh.eased ? ' Eased back a little because the last few days were off target.' : '')
+  );
+}
+
+const paceOptions = (current) =>
+  Object.values(PACES)
+    .map((pc) => `<option value="${pc.key}" ${pc.key === (current ?? DEFAULT_PACE) ? 'selected' : ''}>${pc.blurb}</option>`)
+    .join('');
+
+function viewScheduleCard() {
+  const { settings, sleeps } = store.state;
   const p = prediction();
-  const learned = fmtMinutesAsClock(p.bedtimeMin);
+  const active = settings.priority && PRIORITIES[settings.priority] ? settings.priority : 'protect';
+  const bedGoal = settings.bedtime ? parseHHMM(settings.bedtime) : null;
+  const wakeGoal = settings.wake ? parseHHMM(settings.wake.time) : null;
+
+  const bedHint = bedGoal != null
+    ? 'Naps and the late afternoon are shaped to land here.'
+    : `Not chosen: using about ${clockOf(p.bedtimeMin)}, ${p.bedtime.source === 'learned' ? 'where it has been lately' : 'typical for her age'}.`;
+
+  const bedGradual = Boolean(settings.bedtime && settings.bedShift);
+  const wakeGradual = Boolean(settings.wake && settings.wakeShift);
+  const bedFrom = settings.bedShift?.fromMin ?? ui.prevBedtime ?? recentBedtime(sleeps) ?? p.bedtimeMin;
+  const wakeFrom = settings.wakeShift?.fromMin ?? recentWake(sleeps) ?? wakeGoal ?? 8 * 60;
+
+  return `
+    <section class="card" id="schedule">
+      <h2>Schedule</h2>
+      <fieldset class="priority">
+        <legend class="muted small">What matters most</legend>
+        ${Object.values(PRIORITIES)
+          .map(
+            (pr) => `<label class="opt"><input type="radio" name="priority" value="${pr.key}" ${pr.key === active ? 'checked' : ''}>
+              <span><b>${esc(pr.label)}</b><br><span class="muted small">${esc(pr.blurb)}</span></span></label>`,
+          )
+          .join('')}
+      </fieldset>
+
+      <h3>Bedtime</h3>
+      <div class="grid2">
+        <label class="field"><span>Desired bedtime</span><input type="time" data-s="bed-time" value="${settings.bedtime ?? ''}"></label>
+        <div class="field"><span>&nbsp;</span><button type="button" class="btn secondary small" data-action="clear-bed" ${settings.bedtime ? '' : 'disabled'}>Learn it</button></div>
+      </div>
+      <p class="muted small" id="bedtime-hint">${esc(bedHint)}</p>
+      ${
+        settings.bedtime
+          ? `<label class="check"><input type="checkbox" data-s="bed-gradual" ${bedGradual ? 'checked' : ''}> <span>Move there gradually instead of all at once</span></label>
+             ${
+               bedGradual
+                 ? `<div class="grid2">
+                      <label class="field"><span>Pace</span><select data-s="bed-pace">${paceOptions(settings.bedShift.pace)}</select></label>
+                      <label class="field"><span>Starting from</span><input type="time" data-s="bed-from" value="${toHHMM(bedFrom % 1440)}"></label>
+                    </div>
+                    <p class="muted small">Starting from is where bedtime has been lately. Change it if that isn't right and the steps will start there.</p>
+                    <p class="small" id="bed-shift-status">${esc(shiftStatus(p.bedtime.shift, bedGoal))}</p>`
+                 : ''
+             }`
+          : ''
+      }
+
+      <h3>Morning wake</h3>
+      <div class="grid2">
+        <label class="field"><span>Target wake time</span><input type="time" data-s="wake-time" value="${settings.wake?.time ?? ''}"></label>
+        <label class="field"><span>Range</span><select data-s="wake-range" ${settings.wake ? '' : 'disabled'}>${RANGES.map((r) => `<option value="${r}" ${r === (settings.wake?.range ?? 30) ? 'selected' : ''}>± ${r} min</option>`).join('')}</select></label>
+      </div>
+      <p class="muted small">${
+        settings.wake
+          ? `Anything from ${clockOf(wakeGoal - settings.wake.range)} to ${clockOf(wakeGoal + settings.wake.range)} is fine. If she sleeps past that, Napberry will say when to wake her to protect bedtime rather than pushing the day later.`
+          : 'Optional. Say when you would like her up, and how much either side is fine.'
+      }</p>
+      ${
+        settings.wake
+          ? `<label class="check"><input type="checkbox" data-s="wake-gradual" ${wakeGradual ? 'checked' : ''}> <span>Work toward it gradually</span></label>
+             ${
+               wakeGradual
+                 ? `<div class="grid2">
+                      <label class="field"><span>Pace</span><select data-s="wake-pace">${paceOptions(settings.wakeShift.pace)}</select></label>
+                      <label class="field"><span>Starting from</span><input type="time" data-s="wake-from" value="${toHHMM(wakeFrom % 1440)}"></label>
+                    </div>
+                    <p class="small" id="wake-shift-status">${esc(p.wake?.shift ? shiftStatus(p.wake.shift, wakeGoal) : '')}</p>`
+                 : ''
+             }
+             <button type="button" class="link" data-action="clear-wake">Remove wake target</button>`
+          : ''
+      }
+      <p class="muted small" style="margin-top:12px">Naps themselves aren't a goal. A nap count is shown for information only, and Napberry keeps suggesting naps until another one no longer makes sense before bedtime.</p>
+    </section>`;
+}
+
+function viewSettings() {
+  const { baby, sleeps } = store.state;
   return `
     <section class="card">
       <h2>Baby</h2>
@@ -317,15 +420,7 @@ function viewSettings() {
       <label class="field"><span>Birth date</span><input type="date" data-setting="birth" value="${toInputValue(baby.birth).slice(0, 10)}" max="${toInputValue(Date.now()).slice(0, 10)}"></label>
     </section>
 
-    <section class="card">
-      <h2>Bedtime</h2>
-      <div class="seg" role="radiogroup" aria-label="Bedtime mode">
-        <label><input type="radio" name="bedtime-mode" value="auto" ${fixed ? '' : 'checked'}><span>Learn it</span></label>
-        <label><input type="radio" name="bedtime-mode" value="fixed" ${fixed ? 'checked' : ''}><span>Set a time</span></label>
-      </div>
-      <label class="field"><span>Target bedtime</span><input type="time" data-setting="bedtime-time" value="${settings.bedtime || toHHMM(p.bedtimeMin)}" ${fixed ? '' : 'disabled'}></label>
-      <p class="muted small" id="bedtime-hint" style="margin-top:8px">${fixed ? 'Naps are planned around this time.' : `Currently about ${learned}, based on ${p.learned ? 'recent nights' : 'age'}.`}</p>
-    </section>
+    ${viewScheduleCard()}
 
     ${viewSyncCard()}
 
@@ -594,6 +689,50 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
 }
 
+/** Read the Schedule card and save it. Gradual shifts keep their start unless the starting point changes. */
+function saveSchedule() {
+  const q = (name) => document.querySelector(`#schedule [data-s="${name}"]`);
+  const { settings, sleeps } = store.state;
+  const now = Date.now();
+  const startOfToday = startOfDay(now);
+  const minutesOf = (value, fallback) => {
+    const m = parseHHMM(value);
+    return m == null ? fallback : m;
+  };
+
+  const priority = document.querySelector('#schedule input[name="priority"]:checked')?.value ?? null;
+  const bedtime = q('bed-time')?.value || null;
+  const patch = { priority, bedtime };
+  // Remember the bedtime she had before this change: if gradual shifting is turned on next, that is
+  // the natural place to start from (better than a guess from the log).
+  if (settings.bedtime && bedtime && settings.bedtime !== bedtime) ui.prevBedtime = parseHHMM(settings.bedtime);
+
+  if (bedtime && q('bed-gradual')?.checked) {
+    const prev = settings.bedShift;
+    const typed = q('bed-from') ? minutesOf(q('bed-from').value, null) : null;
+    // A "from" after midnight (like 00:15) means just past the end of the day.
+    const typedFrom = typed != null && typed < 12 * 60 ? typed + 24 * 60 : typed;
+    const fromMin = typedFrom ?? prev?.fromMin ?? ui.prevBedtime ?? recentBedtime(sleeps, now) ?? prediction(now).bedtimeMin;
+    const moved = prev && typedFrom != null && typedFrom !== prev.fromMin;
+    patch.bedShift = { pace: q('bed-pace')?.value ?? prev?.pace ?? DEFAULT_PACE, startedAt: prev && !moved ? prev.startedAt : startOfToday, fromMin };
+  } else {
+    patch.bedShift = null;
+  }
+
+  const wakeTime = q('wake-time')?.value || null;
+  patch.wake = wakeTime ? { time: wakeTime, range: Number(q('wake-range')?.value) || settings.wake?.range || 30 } : null;
+  if (wakeTime && q('wake-gradual')?.checked) {
+    const prev = settings.wakeShift;
+    const typed = q('wake-from') ? minutesOf(q('wake-from').value, null) : null;
+    const fromMin = typed ?? prev?.fromMin ?? recentWake(sleeps, now) ?? parseHHMM(wakeTime);
+    const moved = prev && typed != null && typed !== prev.fromMin;
+    patch.wakeShift = { pace: q('wake-pace')?.value ?? prev?.pace ?? DEFAULT_PACE, startedAt: prev && !moved ? prev.startedAt : startOfToday, fromMin };
+  } else {
+    patch.wakeShift = null;
+  }
+  store.setSettings(patch);
+}
+
 const actions = {
   tab: (el) => {
     ui.tab = el.dataset.tab;
@@ -618,6 +757,20 @@ const actions = {
   },
   'more-history': () => {
     ui.historyDays += 14;
+    renderMain();
+  },
+  'start-early': () => {
+    const p = prediction();
+    const planned = p.mode === 'awake' && p.next.kind === 'nap' ? p.next.at : undefined;
+    const s = store.startSleep('nap', Date.now(), { early: true, planned });
+    toast(s ? 'Noted that she fell asleep early. Napberry will learn from it.' : 'A sleep is already in progress.');
+  },
+  'clear-bed': () => {
+    store.setSettings({ bedtime: null, bedShift: null });
+    renderMain();
+  },
+  'clear-wake': () => {
+    store.setSettings({ wake: null, wakeShift: null });
     renderMain();
   },
   'pick-csv': () => $('csv-input').click(),
@@ -755,12 +908,9 @@ document.addEventListener('change', (e) => {
   } else if (t.matches('[data-setting="birth"]')) {
     const birth = parseDateOnly(t.value);
     if (birth != null) quiet(() => store.setBaby({ ...store.state.baby, birth }));
-  } else if (t.name === 'bedtime-mode' || t.matches('[data-setting="bedtime-time"]')) {
-    const mode = document.querySelector('input[name="bedtime-mode"]:checked')?.value;
-    const time = document.querySelector('[data-setting="bedtime-time"]');
-    time.disabled = mode !== 'fixed';
-    quiet(() => store.setSettings({ bedtime: mode === 'fixed' && time.value ? time.value : null }));
-    $('bedtime-hint').textContent = mode === 'fixed' ? 'Naps are planned around this time.' : 'Learned from recent nights.';
+  } else if (t.closest('#schedule')) {
+    quiet(saveSchedule);
+    renderMain();
   } else if (t.id === 'csv-input' && t.files[0]) {
     onCsvChosen(t.files[0]);
     t.value = '';

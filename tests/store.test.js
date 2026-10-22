@@ -131,3 +131,96 @@ test('joining adopts the family profile and uploads local sleeps', () => {
   store.applyRemote({ profile: { baby: { name: 'Mia', birth: at(2026, 3, 10) }, settings: { bedtime: null }, updatedAt: 1 } });
   assert.equal(store.state.baby.name, 'Mia');
 });
+
+test('a save from before the new settings existed loads untouched, with the new settings simply unset', () => {
+  const storage = memoryStorage();
+  const saved = {
+    version: 2,
+    baby: { name: 'Mia', birth: at(2026, 7, 25) },
+    settings: { bedtime: '22:00' }, // all the app had before
+    profileAt: 7,
+    sleeps: [
+      { id: `s${Math.round(nap(9, 0).start / MIN)}`, ...nap(9, 0), notes: 'keep me', updatedAt: 5, source: 'huckleberry' },
+      { id: `s${Math.round(nap(12, 0).start / MIN)}`, ...nap(12, 0), notes: '', updatedAt: 6 },
+    ],
+    tombstones: { s1: 9 },
+    pending: { sleeps: { s1: 1 }, profile: true },
+  };
+  storage.setItem('napberry:v1', JSON.stringify(saved));
+  const store = createStore(storage, { clock: () => T0 });
+  assert.equal(store.state.baby.name, 'Mia');
+  assert.equal(store.state.settings.bedtime, '22:00', 'the chosen bedtime is kept');
+  assert.deepEqual([store.state.settings.bedShift, store.state.settings.wake, store.state.settings.wakeShift, store.state.settings.priority], [null, null, null, null]);
+  assert.equal(store.state.sleeps.length, 2);
+  assert.equal(store.state.sleeps[0].notes, 'keep me');
+  assert.equal(store.state.sleeps[0].source, 'huckleberry');
+  assert.deepEqual(store.state.tombstones, { s1: 9 });
+  assert.equal(store.state.pending.profile, true);
+  assert.equal(store.state.profileAt, 7);
+});
+
+test('new settings are saved, validated, and part of the profile that syncs', () => {
+  const { store } = mk();
+  store.setBaby({ name: 'Mia', birth: at(2026, 7, 25) });
+  store.setSettings({ bedtime: '20:30', priority: 'protect', wake: { time: '08:00', range: 30 }, bedShift: { pace: 'steady', startedAt: T0, fromMin: 21 * 60 } });
+  const snap = store.pendingSnapshot().profile;
+  assert.equal(snap.settings.bedtime, '20:30');
+  assert.equal(snap.settings.priority, 'protect');
+  assert.deepEqual(snap.settings.wake, { time: '08:00', range: 30 });
+  assert.equal(snap.settings.bedShift.pace, 'steady');
+  assert.equal(snap.settings.wakeShift, null);
+  // Rubbish is refused rather than stored.
+  store.setSettings({ priority: 'chaos', wake: { time: 'soon' }, bedShift: { pace: 'warp' }, bedtime: 'late' });
+  assert.equal(store.state.settings.priority, null);
+  assert.equal(store.state.settings.wake, null);
+  assert.equal(store.state.settings.bedShift, null);
+  assert.equal(store.state.settings.bedtime, null);
+});
+
+test('a profile from an older phone (only bedtime) cannot erase newer settings; a newer profile replaces them', () => {
+  const { store } = mk();
+  store.setBaby({ name: 'Mia', birth: at(2026, 7, 25) });
+  store.setSettings({ bedtime: '20:30', priority: 'wake', wake: { time: '08:00', range: 45 } });
+  store.ackPending(store.pendingSnapshot());
+  const stamp = store.state.profileAt;
+  store.applyRemote({ profile: { baby: { name: 'Mia', birth: at(2026, 7, 25) }, settings: { bedtime: '21:00' }, updatedAt: stamp + 10 } });
+  assert.equal(store.state.settings.bedtime, '21:00', 'what it did send is taken');
+  assert.equal(store.state.settings.priority, 'wake', 'what it did not know about is kept');
+  assert.deepEqual(store.state.settings.wake, { time: '08:00', range: 45 });
+  store.applyRemote({ profile: { baby: { name: 'Mia', birth: at(2026, 7, 25) }, settings: { bedtime: '21:00', priority: null, wake: null }, updatedAt: stamp + 20 } });
+  assert.equal(store.state.settings.priority, null, 'an explicit clear is honoured');
+  assert.equal(store.state.settings.wake, null);
+});
+
+test('"fell asleep early" flags are kept on a sleep through edits and ending it, and exported', () => {
+  const { t, store } = mk();
+  const planned = T0 + 30 * MIN;
+  t.now = T0 + 10 * MIN;
+  const s = store.startSleep('nap', t.now, { early: true, planned });
+  assert.deepEqual(s.flags, { early: true, planned });
+  t.now += 40 * MIN;
+  store.endSleep();
+  store.updateSleep(store.state.sleeps[0].id, { notes: 'rocked' });
+  assert.deepEqual(store.state.sleeps[0].flags, { early: true, planned });
+  assert.deepEqual(store.pendingSnapshot().sleeps[0].flags, { early: true, planned });
+  assert.match(store.exportJSON(), /"early": true/);
+  // Junk flags are ignored.
+  assert.equal(store.addSleep({ ...nap(15, 0), flags: { early: 'yes', planned: 'x' } }).flags, undefined);
+});
+
+test('a server that predates flags does not wipe the flags this phone already has', () => {
+  const { t, store } = mk();
+  t.now = T0;
+  const s = store.startSleep('nap', T0, { early: true, planned: T0 + 20 * MIN });
+  t.now += 30 * MIN;
+  store.endSleep();
+  store.ackPending(store.pendingSnapshot());
+  const mine = store.state.sleeps[0];
+  // Another phone ends up editing the note; its record (from the old server) has no `flags` key at all.
+  store.applyRemote({ sleeps: [{ id: mine.id, start: mine.start, end: mine.end, kind: 'nap', notes: 'edited elsewhere', deleted: false, updatedAt: mine.updatedAt + 5 }] });
+  assert.equal(store.state.sleeps[0].notes, 'edited elsewhere');
+  assert.deepEqual(store.state.sleeps[0].flags, { early: true, planned: s.flags.planned });
+  // A server that supports flags and says "none" does clear them.
+  store.applyRemote({ sleeps: [{ id: mine.id, start: mine.start, end: mine.end, kind: 'nap', notes: 'edited elsewhere', flags: null, deleted: false, updatedAt: mine.updatedAt + 9 }] });
+  assert.equal(store.state.sleeps[0].flags, undefined);
+});

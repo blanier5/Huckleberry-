@@ -57,7 +57,7 @@ test('push then pull round-trips sleeps and profile', { skip }, async () => {
   assert.deepEqual(res, { saved: 2, skipped: 0 });
   const r = await pull();
   assert.equal(r.sleeps.length, 2);
-  assert.deepEqual(r.sleeps[0], { id: 's1', start: 1000000, end: 1003600000, kind: 'nap', notes: '', source: null, deleted: false, updatedAt: 10 });
+  assert.deepEqual(r.sleeps[0], { id: 's1', start: 1000000, end: 1003600000, kind: 'nap', notes: '', source: null, flags: null, deleted: false, updatedAt: 10 });
   assert.equal(r.sleeps[1].end, null);
   assert.equal(r.sleeps[1].source, 'huckleberry');
   assert.deepEqual(r.profile, { baby: { name: 'Mia', birth: 1773100800000 }, settings: { bedtime: '19:30' }, updatedAt: 1000 });
@@ -134,4 +134,40 @@ test('oversized pushes and non-arrays are rejected', { skip }, async () => {
 test('notes are truncated, not rejected', { skip }, async () => {
   await push([nap('long-note', 8000000, 8003000, 400, { notes: 'x'.repeat(2000) })]);
   assert.equal((await pull()).sleeps.find((s) => s.id === 'long-note').notes.length, 500);
+});
+
+test('"fell asleep early" flags are stored, returned, and kept honest', { skip }, async () => {
+  await push([nap('f1', 9000000, 9003000, 500, { flags: { early: true, planned: 8990000 } })]);
+  const f1 = (await pull()).sleeps.find((s) => s.id === 'f1');
+  assert.deepEqual(f1.flags, { early: true, planned: 8990000 });
+  // Not an object, or far too big: the sleep is saved, the flags are dropped.
+  await push([nap('f2', 9100000, 9103000, 500, { flags: 'early' }), nap('f3', 9200000, 9203000, 500, { flags: { note: 'x'.repeat(500) } })]);
+  const rows = (await pull()).sleeps;
+  assert.equal(rows.find((s) => s.id === 'f2').flags, null);
+  assert.equal(rows.find((s) => s.id === 'f3').flags, null);
+  // A newer edit can clear them.
+  await push([nap('f1', 9000000, 9003000, 600, { flags: null })]);
+  assert.equal((await pull()).sleeps.find((s) => s.id === 'f1').flags, null);
+});
+
+test('running setup.sql again on an existing database keeps its data', { skip }, async () => {
+  const before = (await pull()).sleeps.length;
+  await db.exec('reset role');
+  await db.exec(SETUP);
+  await db.exec('set role anon');
+  assert.equal((await pull()).sleeps.length, before);
+});
+
+test('upgrading a database created before the flags column existed keeps every row', { skip }, async () => {
+  await db.exec('reset role');
+  // Put the database back into its earlier shape: no flags column, and old rows in it.
+  await db.exec('drop function public.naps_pull(text, bigint); drop function public.naps_push(text, jsonb, jsonb);');
+  await db.exec('alter table public.naps_sleeps drop column flags');
+  await db.exec("insert into public.naps_sleeps (family_id, id, start_ms, end_ms, kind, notes, updated_at) values ('legacyfamilylegacyfamily1', 'old1', 1000, 2000, 'nap', 'from before', 5)");
+  await db.exec(SETUP);
+  await db.exec('set role anon');
+  const r = await pull('legacyfamilylegacyfamily1');
+  assert.equal(r.sleeps.length, 1);
+  assert.equal(r.sleeps[0].notes, 'from before');
+  assert.equal(r.sleeps[0].flags, null);
 });

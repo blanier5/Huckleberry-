@@ -46,8 +46,15 @@ export function buildDays(sleeps) {
       ((s.kind === 'night' && s.start - last.end < 3 * HOUR) ||
         // A short early-morning "nap" right after a night waking is still night.
         (s.kind === 'nap' && s.start - last.end < 90 * MIN && minutesOfDay(s.start) < 7 * 60));
-    if (continuesNight) last.end = Math.max(last.end, s.end);
-    else items.push({ kind: s.kind, start: s.start, end: s.end });
+    const minutes = (s.end - s.start) / MIN;
+    if (continuesNight) {
+      last.end = Math.max(last.end, s.end);
+      last.chunks += 1;
+      last.asleep += minutes;
+      last.longest = Math.max(last.longest, minutes);
+    } else {
+      items.push({ kind: s.kind, start: s.start, end: s.end, chunks: 1, asleep: minutes, longest: minutes });
+    }
   }
 
   const days = [];
@@ -59,7 +66,16 @@ export function buildDays(sleeps) {
         cur.sane = isSane(cur);
         days.push(cur);
       }
-      cur = { date: startOfDay(it.end), wake: it.end, naps: [], bedtime: null, sane: false };
+      // `night` describes how the night before this day went: how many separate stretches, how long
+      // she slept in total, and her longest stretch. Used to spot a rough night.
+      cur = {
+        date: startOfDay(it.end),
+        wake: it.end,
+        naps: [],
+        bedtime: null,
+        sane: false,
+        night: { start: it.start, end: it.end, chunks: it.chunks, asleep: it.asleep, longest: it.longest },
+      };
     } else if (cur) {
       cur.naps.push(it);
     }
@@ -67,16 +83,27 @@ export function buildDays(sleeps) {
   return { days, open: cur };
 }
 
+/**
+ * Bedtime as minutes after the midnight that starts the day, so a bedtime just past midnight
+ * is 24:15 (1455) rather than 0:15. Keeps late bedtimes comparable and medians meaningful.
+ */
+export function bedtimeMinutes(day) {
+  const clock = new Date(day.bedtime);
+  // Whole days between the two calendar dates (not hours, so a daylight-saving change can't skew it).
+  const dayDiff = Math.round((startOfDay(day.bedtime) - startOfDay(day.wake)) / DAY);
+  return clock.getHours() * 60 + clock.getMinutes() + dayDiff * 24 * 60;
+}
+
 // Guards the learned profile against gaps in logging and odd data.
 function isSane(d) {
   const wake = minutesOfDay(d.wake);
-  const bed = minutesOfDay(d.bedtime);
+  const bed = bedtimeMinutes(d);
   const hours = (d.bedtime - d.wake) / HOUR;
   return (
     wake >= 4 * 60 &&
     wake <= 10.5 * 60 &&
     bed >= 16 * 60 &&
-    bed <= 23.5 * 60 &&
+    bed <= 24.5 * 60 &&
     hours >= 6 &&
     hours <= 17 &&
     d.naps.every((n) => n.start > d.wake && n.end < d.bedtime)
@@ -122,7 +149,7 @@ export function buildProfile(sleeps, { now = Date.now(), lookbackDays = 14, maxA
     napCount,
     windows,
     napLens,
-    bedtimeMin: median(recent.map((d) => minutesOfDay(d.bedtime))),
+    bedtimeMin: median(recent.map(bedtimeMinutes)),
     wakeMin: median(recent.map((d) => minutesOfDay(d.wake))),
     // More matching days -> trust the baby's own numbers more.
     weight: matching.length / (matching.length + 3),
