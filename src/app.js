@@ -87,7 +87,9 @@ function renderTabs() {
   tabs.hidden = !store.state.baby;
   tabs.innerHTML = TABS.map(
     ([id, label]) =>
-      `<button type="button" data-action="tab" data-tab="${id}" ${ui.tab === id ? 'aria-current="page"' : ''}>${ICONS[id]}${label}</button>`,
+      `<button type="button" data-action="tab" data-tab="${id}" ${ui.tab === id ? 'aria-current="page"' : ''}>${ICONS[id]}${label}${
+        id === 'settings' && sync.dbOutdated ? '<span class="badge" role="img" aria-label="Needs attention: database update"></span>' : ''
+      }</button>`,
   ).join('');
 }
 
@@ -411,9 +413,31 @@ function viewScheduleCard() {
     </section>`;
 }
 
+/** Shown (and the Settings tab gets a dot) until the Supabase script has been re-run. */
+function viewDbNotice() {
+  if (!sync.dbOutdated) return '';
+  const editor = sync.sqlEditorUrl();
+  return `
+    <section class="card notice" id="db-notice" role="status">
+      <h2>One-time database update</h2>
+      <p class="small">Your Supabase database is a version behind. Everything still works, but "fell asleep early" notes can't sync between phones until it's updated. It takes about a minute and keeps all your data:</p>
+      <ol class="small steps">
+        <li>Tap <b>Copy the SQL</b>.</li>
+        <li>Open your Supabase project's <b>SQL Editor</b> (the button below).</li>
+        <li>Paste, then press <b>Run</b>.</li>
+      </ol>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-action="copy-sql">Copy the SQL</button>
+        ${editor ? `<a class="btn secondary" href="${esc(editor)}" target="_blank" rel="noopener">Open SQL Editor</a>` : ''}
+      </div>
+      <p class="muted small" style="margin-top:10px">This notice goes away by itself once it's done.</p>
+    </section>`;
+}
+
 function viewSettings() {
   const { baby, sleeps } = store.state;
   return `
+    ${viewDbNotice()}
     <section class="card">
       <h2>Baby</h2>
       <label class="field"><span>Name</span><input type="text" data-setting="name" value="${esc(baby.name)}" autocomplete="off"></label>
@@ -759,6 +783,19 @@ const actions = {
     ui.historyDays += 14;
     renderMain();
   },
+  'copy-sql': async () => {
+    let sql;
+    try {
+      const res = await fetch('supabase/setup.sql', { cache: 'no-cache' });
+      if (!res.ok) throw new Error(String(res.status));
+      sql = await res.text();
+    } catch {
+      toast("Couldn't load the SQL. Check your connection and try again.");
+      return;
+    }
+    if (await copyText(sql)) toast('Copied. Paste it into the Supabase SQL Editor and press Run.');
+    else showTextDialog('Database update', 'Select all, copy, then paste into the Supabase SQL Editor and press Run.', sql);
+  },
   'start-early': () => {
     const p = prediction();
     const planned = p.mode === 'awake' && p.next.kind === 'nap' ? p.next.at : undefined;
@@ -823,6 +860,12 @@ async function copyText(text) {
   } catch {
     return false;
   }
+}
+
+function showTextDialog(title, hint, text) {
+  showDialog(`<form><h2>${esc(title)}</h2><p class="muted small">${esc(hint)}</p>
+    <label class="field"><textarea readonly rows="10" onfocus="this.select()">${esc(text)}</textarea></label>
+    <div class="dialog-actions"><button type="button" class="btn" data-action="close">Done</button></div></form>`);
 }
 
 function showInviteDialog() {
@@ -949,10 +992,17 @@ document.addEventListener('focusout', () => {
   }, 0);
 });
 
+let lastDbOutdated = false;
 sync.onChange(() => {
   renderHeader();
+  renderTabs();
   const el = $('sync-status');
   if (el) el.textContent = syncLabel();
+  // The update was just done (or just found to be needed): show or clear the notice.
+  if (sync.dbOutdated !== lastDbOutdated) {
+    lastDbOutdated = sync.dbOutdated;
+    if (ui.tab === 'settings' && store.state.baby && !editingInMain()) renderMain();
+  }
 });
 
 function tick() {

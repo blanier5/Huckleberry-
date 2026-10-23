@@ -71,7 +71,7 @@ It uses **your own free Supabase project** as the shared memory (Napberry has no
 
 **iPhone note.** A Home Screen app on iOS does not share storage with Safari, so one added from Safari starts empty. That's fine with sync: open it, paste the invite on the welcome screen, and everything appears.
 
-**Updating the database (one paste, only when a release says so).** Newer versions add the "fell asleep early" notes, which need one extra column. Open Supabase, go to SQL Editor, paste the current `supabase/setup.sql` and Run it again. It's safe to repeat and keeps all your data. Until you do, everything still works; those notes just stay on the phone that recorded them.
+**Updating the database (one paste, only when a release says so).** Newer versions add the "fell asleep early" notes, which need one extra column. Open Supabase, go to SQL Editor, paste the current `supabase/setup.sql` and Run it again. It's safe to repeat and keeps all your data. Until you do, everything still works; those notes just stay on the phone that recorded them. You won't have to remember: while the database is a version behind, Settings shows a **One-time database update** notice (with a **Copy the SQL** button and a link to your project's SQL editor) and a dot on the Settings tab. It disappears by itself once the script has been run.
 
 **How it behaves.** Napberry always works offline: changes save on the phone first and upload when there's a connection (the little dot by the age shows green, grey while syncing, or orange when offline). If two phones edit the same sleep, the most recent edit wins. If both start a nap before seeing each other's, the first one is kept. Deleting a sleep deletes it everywhere.
 

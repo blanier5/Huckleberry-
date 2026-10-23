@@ -1,6 +1,6 @@
 // Offline support: network-first so updates show up immediately, with the
 // cache as a fallback when there's no connection (e.g. at 3am in a dark room).
-const CACHE = 'napberry-v3';
+const CACHE = 'napberry-v4';
 const SHELL = [
   './',
   'index.html',
@@ -20,6 +20,7 @@ const SHELL = [
   'src/store.js',
   'src/sync.js',
   'src/time.js',
+  'supabase/setup.sql',
 ];
 
 self.addEventListener('install', (event) => {

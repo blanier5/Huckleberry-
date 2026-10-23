@@ -762,3 +762,37 @@ textarea {
 .sub + .sub {
   margin-top: 4px;
 }
+
+/* ---------- database update reminder ---------- */
+
+.tabs button {
+  position: relative;
+}
+
+.badge {
+  position: absolute;
+  top: 6px;
+  right: calc(50% - 20px);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--warn);
+  border: 2px solid var(--card);
+}
+
+.notice {
+  border: 2px solid var(--warn);
+}
+
+.steps {
+  margin: 8px 0 12px;
+  padding-left: 20px;
+}
+
+.steps li + li {
+  margin-top: 4px;
+}
+
+a.btn {
+  text-decoration: none;
+}

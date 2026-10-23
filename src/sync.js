@@ -7,6 +7,8 @@ import { defaultStorage } from './store.js';
 export const POLL_MS = 20_000;
 const PUSH_DEBOUNCE_MS = 700;
 const CHUNK = 500;
+/** The newest database script this version of the app expects (supabase/setup.sql reports its own). */
+export const REQUIRED_DB_VERSION = 2;
 const CONFIG_KEY = 'napberry:sync:v1';
 const INVITE_PREFIX = 'nb1.';
 
@@ -134,7 +136,8 @@ export function createSync({
 }) {
   let cfg = null; // { url, key, family, cursor }
   let remote = null;
-  let status = { state: 'off', lastOk: null, message: '' };
+  let status = { state: 'off', lastOk: null, message: '', dbOutdated: false };
+  let dbVersion = null; // reported by the server on every pull; a script older than version 2 reports none
   let inFlight = null;
   let rerun = false;
   let pushTimer = null;
@@ -187,9 +190,10 @@ export function createSync({
         store.queueAll({ profile: true });
       }
       cfg.cursor = Math.max(cfg.cursor, Number(res.cursor) || 0);
+      dbVersion = Number(res.version) || 1;
       if (!store.hasPending()) break;
     }
-    status = { ...status, lastOk: clock() };
+    status = { ...status, lastOk: clock(), dbOutdated: dbVersion != null && dbVersion < REQUIRED_DB_VERSION };
     saveCfg();
   }
 
@@ -210,7 +214,7 @@ export function createSync({
           await cycle();
         } while (rerun);
         ok = true;
-        setStatus({ state: 'ok', message: '' });
+        setStatus({ state: 'ok', message: '' }); // keeps dbOutdated from the cycle
       } catch (err) {
         const offline = err instanceof SyncError && err.kind === 'network';
         setStatus({ state: offline ? 'offline' : 'error', message: err instanceof SyncError ? err.message : 'Sync failed unexpectedly.' });
@@ -247,6 +251,19 @@ export function createSync({
   const sync = {
     get status() {
       return status;
+    },
+    /** True when the Supabase database script is older than this version of the app expects. */
+    get dbOutdated() {
+      return Boolean(cfg && status.dbOutdated);
+    },
+    /** Link to the SQL editor of the connected Supabase project (null for non-Supabase URLs). */
+    sqlEditorUrl() {
+      try {
+        const host = new URL(cfg.url).hostname;
+        return host.endsWith('.supabase.co') ? `https://supabase.com/dashboard/project/${host.split('.')[0]}/sql/new` : null;
+      } catch {
+        return null;
+      }
     },
     get enabled() {
       return Boolean(cfg);
@@ -305,7 +322,8 @@ export function createSync({
       cfg = null;
       remote = null;
       saveCfg();
-      setStatus({ state: 'off', lastOk: null, message: '' });
+      dbVersion = null;
+      setStatus({ state: 'off', lastOk: null, message: '', dbOutdated: false });
     },
   };
   return sync;
