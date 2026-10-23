@@ -371,7 +371,7 @@ function viewScheduleCard() {
           ? `<label class="check"><input type="checkbox" data-s="bed-gradual" ${bedGradual ? 'checked' : ''}> <span>Move there gradually instead of all at once</span></label>
              ${
                bedGradual
-                 ? `<div class="grid2">
+                 ? `<div class="grid2 stack">
                       <label class="field"><span>Pace</span><select data-s="bed-pace">${paceOptions(settings.bedShift.pace)}</select></label>
                       <label class="field"><span>Starting from</span><input type="time" data-s="bed-from" value="${toHHMM(bedFrom % 1440)}"></label>
                     </div>
@@ -397,7 +397,7 @@ function viewScheduleCard() {
           ? `<label class="check"><input type="checkbox" data-s="wake-gradual" ${wakeGradual ? 'checked' : ''}> <span>Work toward it gradually</span></label>
              ${
                wakeGradual
-                 ? `<div class="grid2">
+                 ? `<div class="grid2 stack">
                       <label class="field"><span>Pace</span><select data-s="wake-pace">${paceOptions(settings.wakeShift.pace)}</select></label>
                       <label class="field"><span>Starting from</span><input type="time" data-s="wake-from" value="${toHHMM(wakeFrom % 1440)}"></label>
                     </div>
