@@ -449,6 +449,9 @@ details li + li {
   margin-bottom: 4px;
 }
 
+/* Every field is the same height and exactly as wide as its column. iOS draws
+   date, time and select controls with their own intrinsic size, which is what
+   made them overflow their card and sit at different heights. */
 input[type='text'],
 input[type='date'],
 input[type='time'],
@@ -456,12 +459,49 @@ input[type='url'],
 input[type='datetime-local'],
 select,
 textarea {
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
   width: 100%;
-  min-height: 48px;
+  min-width: 0;
+  max-width: 100%;
+  height: 48px;
   padding: 8px 12px;
   border: 1.5px solid var(--line);
   border-radius: 12px;
-  background: var(--bg);
+  background-color: var(--bg);
+  line-height: 1.25;
+}
+
+textarea {
+  height: auto;
+  min-height: 48px;
+}
+
+input[type='date'],
+input[type='time'],
+input[type='datetime-local'] {
+  text-align: left;
+}
+
+input::-webkit-date-and-time-value {
+  text-align: left;
+  min-height: 1.25em;
+  margin: 0;
+}
+
+select {
+  padding-right: 34px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 19px) 50%, calc(100% - 13px) 50%;
+  background-size: 6px 6px;
+  background-repeat: no-repeat;
+  text-overflow: ellipsis;
+}
+
+select:disabled,
+input:disabled {
+  opacity: 0.55;
 }
 
 .seg {
@@ -690,13 +730,33 @@ textarea {
 
 .grid2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
   align-items: end;
 }
 
+.grid2 > * {
+  min-width: 0;
+}
+
 .btn.small {
   width: 100%;
+}
+
+/* Beside a field, the button matches the field's size and shape. */
+.grid2 .btn.small {
+  min-height: 48px;
+  height: 48px;
+  border-radius: 12px;
+  padding: 0 12px;
+}
+
+/* "15 min every 3 days" doesn't fit in half a phone screen, so those pairs stack. */
+@media (max-width: 480px) {
+  .grid2.stack {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
 }
 
 .sub + .sub {
