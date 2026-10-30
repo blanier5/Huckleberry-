@@ -5,6 +5,7 @@ import { parseHuckleberryCSV } from './huckleberry.js';
 import { createSync, parseInvite } from './sync.js';
 import { PRIORITIES } from './planner.js';
 import { PACES, RANGES, DEFAULT_PACE, recentBedtime, recentWake } from './shift.js';
+import { REASONS, SETTLE_LABELS, activeRecovery, reasonLabels } from './recovery.js';
 import {
   MIN,
   startOfDay,
@@ -129,6 +130,15 @@ function viewOnboarding() {
     </div>`;
 }
 
+/** The notes a parent has put on a sleep, as " · fell asleep early · several failed transfers". */
+function sleepTags(s) {
+  const tags = [];
+  if (s.flags?.early) tags.push('fell asleep early');
+  if (SETTLE_LABELS[s.flags?.settle]) tags.push(SETTLE_LABELS[s.flags.settle]);
+  if (s.flags?.cut) tags.push('cut short');
+  return tags.map((t) => ` · ${t}`).join('');
+}
+
 function sleepRow(s, now, groupDate) {
   const minutes = ((s.end ?? now) - s.start) / MIN;
   // A night that began the evening before is listed under the morning it ends, so say which evening.
@@ -137,7 +147,7 @@ function sleepRow(s, now, groupDate) {
   return `<li><button type="button" class="row" data-action="edit" data-id="${esc(s.id)}">
     <span class="dot ${s.kind === 'night' ? 'night' : ''}"></span>
     <span class="grow"><span class="title">${s.kind === 'night' ? 'Night sleep' : 'Nap'}</span><br>
-    <span class="meta">${range}${s.flags?.early ? ' · fell asleep early' : ''}${s.notes ? ` · ${esc(s.notes)}` : ''}</span></span>
+    <span class="meta">${range}${sleepTags(s)}${s.notes ? ` · ${esc(s.notes)}` : ''}</span></span>
     <span class="end">${fmtDuration(minutes)}</span></button></li>`;
 }
 
@@ -174,6 +184,29 @@ function todayLog(now) {
   return store.state.sleeps.filter((s) => (s.end ?? now) >= from).sort((a, b) => b.start - a.start);
 }
 
+const capital = (str) => str.charAt(0).toUpperCase() + str.slice(1);
+
+/** Shown while the day counts as a rough one: what that changes, and how to switch it off or edit it. */
+function viewRecoveryCard(p) {
+  const st = p.strain;
+  if (!st?.relaxed) return '';
+  const why = st.manual
+    ? st.manualReasons.length
+      ? `Rough-day mode: ${reasonLabels(st.manualReasons).join(', ')}.`
+      : 'Rough-day mode is on.'
+    : `${capital(st.signals.join(', '))} today.`;
+  return `
+    <section class="card recovery" id="recovery" aria-label="Rough day">
+      <h2>Taking it easy today</h2>
+      <p class="small">${esc(why)}</p>
+      <p class="muted small">Napberry won't ask you to wake her to protect bedtime. Naps can run long, an extra nap is fine, and bedtime can move earlier or later if she needs the sleep.</p>
+      <div class="links">
+        <button type="button" class="link" data-action="rough-day">${st.manual ? 'Change' : 'Add what happened…'}</button>
+        ${st.manual ? '<button type="button" class="link" data-action="rough-day-off">Back to normal</button>' : ''}
+      </div>
+    </section>`;
+}
+
 function viewToday() {
   const now = Date.now();
   const p = prediction(now);
@@ -195,8 +228,12 @@ function viewToday() {
         <div class="big">${fmtDuration(p.elapsed)}</div>
         <p class="sub">${expect}</p>
         <div class="cta"><button type="button" class="btn on-hero" data-action="wake">Wake up</button></div>
-        <div class="links"><button type="button" class="link" data-action="wake-at">Woke up earlier…</button></div>
+        <div class="links">
+          <button type="button" class="link" data-action="wake-at">Woke up earlier…</button>
+          ${night || !store.ongoing ? '' : `<button type="button" class="link" data-action="settle" data-id="${esc(store.ongoing.id)}">How did she settle?</button>`}
+        </div>
       </section>`);
+    out.push(viewRecoveryCard(p));
     if (p.after?.length) {
       out.push(`<section class="card"><h2>After waking</h2><ul class="rows">${planRows(p.after)}</ul></section>`);
     }
@@ -224,6 +261,7 @@ function viewToday() {
         <ul>${p.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
         <p class="muted small" style="margin-top:10px">${basisChip(p)}</p>
       </details>
+      ${viewRecoveryCard(p)}
       <section class="card"><h2>Today's plan</h2><ul class="rows">${planRows([next, ...p.later])}</ul></section>`);
   } else if (p.mode === 'night-awake') {
     out.push(`
@@ -255,6 +293,7 @@ function viewToday() {
       <h2>Today so far<span class="aside">${log.length ? '' : 'nothing logged'}</span></h2>
       ${log.length ? `<ul class="rows">${log.map((s) => sleepRow(s, now, startOfDay(now))).join('')}</ul>` : ''}
       <button type="button" class="link" data-action="add">+ Add a past sleep</button>
+      ${p.strain?.relaxed || p.mode === 'empty' || p.mode === 'stale' ? '' : '<button type="button" class="link" data-action="rough-day">Rough day? Be flexible today</button>'}
     </section>`);
   return out.join('');
 }
@@ -508,6 +547,81 @@ const kindSeg = (kind) => `
     <label><input type="radio" name="kind" value="night" ${kind === 'night' ? 'checked' : ''}><span>Night</span></label>
   </div>`;
 
+/** How she settled for a sleep: easily (nothing is saved), it took a while, or several failed transfers. */
+const settleSeg = (value) => `
+  <div class="seg" role="radiogroup" aria-label="How she settled">
+    <label><input type="radio" name="settle" value="0" ${value ? '' : 'checked'}><span>Easily</span></label>
+    <label><input type="radio" name="settle" value="1" ${value === 1 ? 'checked' : ''}><span>Took a while</span></label>
+    <label><input type="radio" name="settle" value="2" ${value === 2 ? 'checked' : ''}><span>Failed transfers</span></label>
+  </div>`;
+
+const cutCheck = (checked) =>
+  `<label class="check"><input type="checkbox" name="cut" ${checked ? 'checked' : ''}> <span>Cut short (woken or disturbed)</span></label>`;
+
+/** The flags a dialog form describes, keeping what it doesn't ask about (like "fell asleep early"). Null if none. */
+function flagsFrom(form, old) {
+  const flags = { ...(old ?? {}) };
+  delete flags.settle;
+  delete flags.cut;
+  const settle = Number(form.get('settle'));
+  if (settle === 1 || settle === 2) flags.settle = settle;
+  if (form.get('cut')) flags.cut = true;
+  return Object.keys(flags).length ? flags : null;
+}
+
+/** A quick note on the sleep in progress (or a finished one): how she settled, and whether it was cut short. */
+function openSettle(id) {
+  const s = store.state.sleeps.find((x) => x.id === id);
+  if (!s) return;
+  showDialog(
+    `<form>
+      <h2>How did she settle?</h2>
+      <p class="muted small">Several failed transfers or a long settle often mean a harder day. Napberry gets more flexible about naps and bedtime when you say so.</p>
+      <div class="field">${settleSeg(s.flags?.settle)}</div>
+      ${s.end == null ? '' : cutCheck(s.flags?.cut)}
+      <div class="dialog-actions">
+        <button type="button" class="btn secondary" data-action="close">Cancel</button>
+        <button class="btn">Save</button>
+      </div>
+    </form>`,
+    (form) => {
+      const saved = store.updateSleep(s.id, { flags: flagsFrom(form, s.flags) });
+      closeDialog();
+      toast(saved ? 'Noted' : "Couldn't save that");
+    },
+  );
+}
+
+/** Switch rough-day mode on, change why, or turn it off. */
+function openRoughDay() {
+  const { settings, sleeps } = store.state;
+  const cur = activeRecovery(settings.recovery, sleeps, Date.now());
+  showDialog(
+    `<form>
+      <h2>${cur ? 'Rough day' : 'Make today flexible'}</h2>
+      <p class="muted small">After shots, an appointment, illness, travel or a day of broken naps she may need more sleep than a schedule allows. Napberry stops asking you to wake her to protect bedtime, lets naps run, and lets bedtime move. It switches off by itself once she wakes for the day tomorrow.</p>
+      <div class="field"><span>What's going on? (optional)</span>
+        ${REASONS.map((r) => `<label class="check"><input type="checkbox" name="reason" value="${r.key}" ${cur?.reasons?.includes(r.key) ? 'checked' : ''}> <span>${esc(r.label)}</span></label>`).join('')}
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="btn secondary" data-action="close">Cancel</button>
+        <button class="btn">${cur ? 'Save' : 'Turn on'}</button>
+      </div>
+      ${cur ? '<div class="dialog-actions" style="margin-top:10px"><button class="btn danger" name="act" value="off">Back to normal</button></div>' : ''}
+    </form>`,
+    (form, submitter) => {
+      closeDialog();
+      if (submitter?.value === 'off') return rough(null, 'Back to the usual plan');
+      rough({ since: cur?.since ?? Date.now(), reasons: form.getAll('reason') }, 'Napberry will be flexible today');
+    },
+  );
+}
+
+function rough(recovery, message) {
+  store.setSettings({ recovery });
+  toast(message);
+}
+
 function openSleepEditor(id) {
   const existing = id ? store.state.sleeps.find((s) => s.id === id) : null;
   const now = Date.now();
@@ -520,6 +634,8 @@ function openSleepEditor(id) {
       <label class="field"><span>Fell asleep</span><input type="datetime-local" name="start" value="${toInputValue(s.start)}" required></label>
       <label class="field"><span>Woke up${ongoing ? ' (leave empty while still asleep)' : ''}</span><input type="datetime-local" name="end" value="${s.end ? toInputValue(s.end) : ''}" ${ongoing ? '' : 'required'}></label>
       <label class="field"><span>Notes</span><input type="text" name="notes" value="${esc(s.notes)}" autocomplete="off"></label>
+      <div class="field"><span>How did she settle?</span>${settleSeg(s.flags?.settle)}</div>
+      ${cutCheck(s.flags?.cut)}
       <p class="error" hidden></p>
       <div class="dialog-actions">
         <button type="button" class="btn secondary" data-action="close">Cancel</button>
@@ -544,7 +660,7 @@ function openSleepEditor(id) {
       if (end != null && end - start > 20 * 60 * MIN) return dialogError('That is longer than 20 hours. Check the dates.');
       if (start > Date.now() + 5 * MIN) return dialogError('That start time is in the future.');
       if (store.hasSleepAt(start, existing?.id)) return dialogError('Another sleep already starts at that minute.');
-      const patch = { start, end, kind: form.get('kind'), notes: String(form.get('notes') || '').trim() };
+      const patch = { start, end, kind: form.get('kind'), notes: String(form.get('notes') || '').trim(), flags: flagsFrom(form, existing?.flags) };
       const saved = existing ? store.updateSleep(existing.id, patch) : store.addSleep(patch);
       if (!saved) return dialogError("Couldn't save that. Check the times.");
       closeDialog();
@@ -796,6 +912,9 @@ const actions = {
     if (await copyText(sql)) toast('Copied. Paste it into the Supabase SQL Editor and press Run.');
     else showTextDialog('Database update', 'Select all, copy, then paste into the Supabase SQL Editor and press Run.', sql);
   },
+  settle: (el) => openSettle(el.dataset.id),
+  'rough-day': openRoughDay,
+  'rough-day-off': () => rough(null, 'Back to the usual plan'),
   'start-early': () => {
     const p = prediction();
     const planned = p.mode === 'awake' && p.next.kind === 'nap' ? p.next.at : undefined;

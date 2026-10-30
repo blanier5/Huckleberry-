@@ -150,6 +150,14 @@ test('"fell asleep early" flags are stored, returned, and kept honest', { skip }
   assert.equal((await pull()).sleeps.find((s) => s.id === 'f1').flags, null);
 });
 
+test('settling and cut-short notes, and rough-day mode, need no database change: they ride in the existing columns', { skip }, async () => {
+  const profile = { baby: { name: 'Mia', birth: 1773100800000 }, settings: { bedtime: '20:30', recovery: { since: 1790000000000, reasons: ['vaccine', 'appointment'] } }, updatedAt: 9000 };
+  await push([nap('r1', 9300000, 9303000, 700, { flags: { settle: 2, cut: true } })], profile);
+  const r = await pull();
+  assert.deepEqual(r.sleeps.find((s) => s.id === 'r1').flags, { settle: 2, cut: true });
+  assert.deepEqual(r.profile.settings.recovery, { since: 1790000000000, reasons: ['vaccine', 'appointment'] });
+});
+
 test('running setup.sql again on an existing database keeps its data', { skip }, async () => {
   const before = (await pull()).sleeps.length;
   await db.exec('reset role');

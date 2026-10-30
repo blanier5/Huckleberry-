@@ -108,7 +108,8 @@ function nightQuality(days, open, now) {
  *
  * sleeps may include `flags: { early, planned }` on a sleep: the parent said she fell asleep earlier
  * than suggested, and `planned` is when the app had suggested. Those are treated as information
- * about her, not as noise.
+ * about her, not as noise. A nap flagged `cut` (woken or disturbed) is left out of her usual nap
+ * length, since it says nothing about how long she naps when left alone.
  */
 export function learnRhythm(sleeps, { now = Date.now(), maxGapMin = 240 } = {}) {
   const from = now - LOOKBACK_DAYS * DAY;
@@ -134,7 +135,7 @@ export function learnRhythm(sleeps, { now = Date.now(), maxGapMin = 240 } = {}) 
     }
   }
   const naps = done
-    .filter((s) => s.kind === 'nap' && (s.end - s.start) / MIN >= 5 && (s.end - s.start) / MIN <= 180)
+    .filter((s) => s.kind === 'nap' && !s.flags?.cut && (s.end - s.start) / MIN >= 5 && (s.end - s.start) / MIN <= 180)
     .map((s) => ({ at: s.start, h: hourOf(s.start), v: (s.end - s.start) / MIN }));
 
   const { days, open } = buildDays(sleeps.filter((s) => s.end != null && s.end <= now));

@@ -51,8 +51,24 @@ Every suggestion has a "Why this time?" panel listing exactly what it used.
 - **What matters most.** *Protect bedtime* holds bedtime tightly and bends the day to it. *Maximize total sleep* lets naps run their course and offers extra naps, with bedtime free to drift about an hour. *Build a consistent morning wake time* anchors the day to your wake target. *Follow baby cues* stays close to her natural windows and lets bedtime land within about an hour of the target.
 - **Desired bedtime.** For example 8:30 PM. The late afternoon is shaped to land on it instead of wherever her windows happen to lead. Leave it unset to use where bedtime has been lately.
 - **Move bedtime gradually.** Instead of one jump, the target moves toward your desired bedtime in small steps: *10 min every 3 days*, *15 min every 3 days* or *15 min every 2 days*. A step only happens once she has actually gone down near the current target for that many days; if she can't keep up, the target eases back instead of racing ahead. Works for earlier or later. "Starting from" is filled in for you and can be changed.
-- **Morning wake target with a range.** For example 8:00 AM &plusmn; 30 minutes, meaning 7:30 to 8:30 is fine. While she is asleep past the range, Napberry says *"Wake by 8:30 AM to protect tonight's bedtime"* instead of pushing the whole day later. If she wakes late, the day is compressed and bedtime stays put. You can also work toward the wake time gradually.
+- **Morning wake target with a range.** For example 8:00 AM &plusmn; 30 minutes, meaning 7:30 to 8:30 is fine. While she is asleep past the range, Napberry says *"Wake by 8:30 AM to protect tonight's bedtime"* instead of pushing the whole day later (unless it's a [rough day](#rough-days), when she can sleep on). If she wakes late, the day is compressed and bedtime stays put. You can also work toward the wake time gradually.
 - **Fell asleep early.** If she drops off before the suggested time, tap **Fell asleep early** instead of just *Start nap*. Napberry records when it had suggested, and learns that her windows around that time of day run shorter, instead of treating it as a one-off.
+
+### Rough days
+
+A day with short or interrupted naps, trouble settling, shots, an appointment or an illness leaves a baby needing more sleep, not an exact bedtime. When a day counts as rough, Napberry:
+
+- **never asks you to wake her to protect bedtime** (no "wake by" prompts, tonight or in the morning),
+- plans windows a little shorter, lets naps run long, and is quicker to add an extra nap, with no nap-count limit either way,
+- lets bedtime move earlier or later instead of cutting sleep short, and says where it expects it to land,
+- recalculates the rest of the day when a nap runs past its usual length: fewer naps, shorter ones, or a later bedtime, never a nap cut off in the plan.
+
+Two things make it a rough day, and either is enough:
+
+1. **What the log shows.** Short naps (short for her, so a baby who always catnaps isn't flagged), naps marked *cut short*, naps marked *took a while to settle* or *several failed transfers*, and a rough night add up to a strain score. Two short naps, or one interrupted short nap, or failed transfers plus a short nap, is a rough day; a single short nap only nudges. Say how a sleep went with **How did she settle?** while she's asleep, or in the sleep editor (**Settling**, **Cut short**).
+2. **Rough-day mode, by hand.** On Today, tap **Rough day? Be flexible today** and tick what's going on: vaccination or shots, an appointment, not feeling well, travel, naps getting interrupted, trouble settling. It syncs to the other phone, and switches off by itself once she wakes for the day after the night that follows (or after 36 hours).
+
+On an ordinary day, waking her is a last resort: it is mentioned only when letting her sleep on would push bedtime 20 or more minutes past your target even after dropping naps and shortening the evening, and it says what sleeping on would cost ("bedtime lands about 9:40 PM, 40 minutes after your target") so the choice is yours. These notes sync like everything else and need no database update.
 
 Napberry gives general guidance, not medical advice. Predictions are most meaningful from about 2 months, and at young ages windows vary a lot from day to day, which is why suggestions come with a range and a "watch for cues" time.
 
@@ -89,6 +105,7 @@ Everything is stored in the browser's local storage on **this device**, plus you
 index.html, manifest.webmanifest, sw.js   app shell, PWA manifest, offline cache
 src/app.js         UI: views, dialogs, events
 src/predict.js     builds a prediction from the log and settings (pure function)
+src/recovery.js    rough days: how strained today has been, rough-day mode, relaxed planning
 src/planner.js     fits naps and a bridge nap between her last wake and bedtime
 src/learn.js       her rhythm by time of day, nap quality, rough nights, early notes
 src/shift.js       gradual bedtime / wake-time shifting and the wake range

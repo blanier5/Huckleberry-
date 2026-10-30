@@ -58,7 +58,8 @@ test('naps keep being suggested after 5 or 6: nap count is information, not a li
 test('the next nap depends on the last wake time and nap quality, not on the nap number', () => {
   const sleeps = history();
   const run = (len, napsBefore) => {
-    const naps = Array.from({ length: napsBefore }, (_, i) => sleep(D(8 + i, 0), D(8 + i, 20)));
+    // Earlier naps of an ordinary length, so how many came before is the only thing that differs.
+    const naps = Array.from({ length: napsBefore }, (_, i) => sleep(D(8 + i, 0), D(8 + i, 45)));
     const nap = sleep(D(12, 0), D(12, 0) + len * MIN);
     const p = predict({ sleeps: [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), ...naps.filter((n) => n.end < D(12)), nap], baby: BABY, now: nap.end + 5 * MIN });
     return { p, window: (p.next.at - nap.end) / MIN };
@@ -148,16 +149,27 @@ test('a bedtime shift uses the stage target, not the final one', () => {
   assert.ok(p.reasons.some((r) => /step on the way/i.test(r)));
 });
 
-test('asleep in a nap that would crowd bedtime: wake-by is offered', () => {
+test('a nap that runs long is never cut short in the plan; the evening adjusts and waking her is a last resort', () => {
   const sleeps = history();
-  const start = D(17, 20);
-  const p = predict({ sleeps: [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), { id: 'o', start, end: null, kind: 'nap', notes: '' }], baby: BABY, settings: { bedtime: '20:00' }, now: start + 20 * MIN });
-  assert.equal(p.mode, 'asleep');
-  assert.equal(p.kind, 'nap');
-  assert.ok(p.wakeBy != null && p.wakeBy > start);
-  assert.ok(p.wakeBy < D(19, 30));
-  assert.ok(p.notes.some((n) => /Wake by/i.test(n)) === p.capped);
-  assert.equal(p.after[0].kind === 'nap' || p.after[0].kind === 'bedtime', true);
+  const asleep = (startAt, nowAt) => [...sleeps, sleep(D(7) - 9 * 60 * MIN, D(7), 'night'), { id: 'o', start: startAt, end: null, kind: 'nap', notes: '' }, nowAt];
+  const run = (start, now) => predict({ sleeps: asleep(start, null).filter(Boolean), baby: BABY, settings: { bedtime: '20:00' }, now });
+
+  // Just started: nothing to say.
+  const fresh = run(D(17, 20), D(17, 40));
+  assert.equal(fresh.wakeBy, null);
+  assert.equal(fresh.notes.length, 0);
+
+  // Running past the usual length, but the evening can absorb it: fewer naps, no wake-by.
+  const long = run(D(17, 20), D(18, 40));
+  assert.equal(long.wakeBy, null);
+  assert.ok(long.notes.some((n) => /past the usual .*fewer nap/i.test(n)), long.notes.join(' / '));
+  assert.ok(long.expectedWake >= D(18, 40), 'the plan starts from when she actually wakes, not from a cut-off');
+
+  // So long that bedtime really slips: waking her is offered, along with what sleeping on costs.
+  const tooLong = run(D(17, 20), D(19, 20));
+  assert.ok(tooLong.wakeBy != null && tooLong.wakeBy >= D(17, 30));
+  assert.match(tooLong.notes[0], /If she sleeps on, bedtime lands about .* after your 8:00 PM target\. To hold 8:00 PM, wake her by/);
+  assert.ok(bedOf({ next: tooLong.after[0], later: tooLong.after.slice(1) }).at > D(20, 15), 'the shown plan lets her sleep and moves bedtime');
 });
 
 test('asleep through the night with a wake target: waking guidance follows the range', () => {
