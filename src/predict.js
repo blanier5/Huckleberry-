@@ -3,6 +3,7 @@ import { ageNorms } from './norms.js';
 import { learnRhythm, napQuality, windowPrior, napLenPrior } from './learn.js';
 import { planDay, latestWake, sweetSpotHalf, PRIORITIES, DEFAULT_PRIORITY } from './planner.js';
 import { bedtimeTarget, wakeTarget } from './shift.js';
+import { assessDay, relaxPolicy, reasonLabels } from './recovery.js';
 
 const hourOf = (ms) => {
   const d = new Date(ms);
@@ -77,18 +78,22 @@ function decorate(items, ctx) {
  * Main entry point. A pure function of the log and settings, so it is easy to test.
  *
  *   baby:     { name, birth: epoch ms }
- *   settings: { bedtime, bedShift, wake, wakeShift, priority } (all optional)
+ *   settings: { bedtime, bedShift, wake, wakeShift, priority, recovery } (all optional)
  *
  * What it does not do: use a nap count as a limit or a goal. The next suggestion is built from
  * when she last woke, how good the last nap was, the time of day, how the night went, and where
  * bedtime should land. Naps keep being suggested until another one no longer makes sense.
+ *
+ * On a rough day (short or interrupted naps, trouble settling, or rough-day mode switched on) it
+ * stops asking anyone to wake her to protect bedtime, and lets bedtime move instead (see recovery.js).
  */
 export function predict({ sleeps, baby, settings = {}, now = Date.now() }) {
   const ageMonths = ageInMonths(baby.birth, now);
   const norms = ageNorms(ageMonths);
   const rhythm = learnRhythm(sleeps, { now, maxGapMin: Math.max(240, norms.ww * 2) });
-  const policy = PRIORITIES[settings.priority] ?? PRIORITIES[DEFAULT_PRIORITY];
   const ctx = makeCtx(rhythm, norms);
+  const strain = assessDay({ sleeps, settings, rhythm, typicalNap: ctx.napLength, now });
+  const policy = relaxPolicy(PRIORITIES[settings.priority] ?? PRIORITIES[DEFAULT_PRIORITY], strain);
   const bed = resolveBedtime({ settings, rhythm, norms, sleeps, now });
   const wake = wakeTarget({ settings, sleeps, now });
 
@@ -101,11 +106,12 @@ export function predict({ sleeps, baby, settings = {}, now = Date.now() }) {
     wake,
     night: rhythm.night,
     cues: rhythm.cueCount,
+    strain,
   };
 
   const done = sleeps.filter((s) => s.end != null && s.end > s.start).sort((a, b) => a.start - b.start);
   const ongoing = sleeps.filter((s) => s.end == null).sort((a, b) => a.start - b.start)[0];
-  const env = { now, norms, rhythm, policy, ctx, bed, wake, done };
+  const env = { now, norms, rhythm, policy, ctx, bed, wake, done, strain };
 
   if (ongoing) return { ...base, ...predictAsleep(ongoing, env) };
   if (!done.length) return { ...base, mode: 'empty', napsSoFar: 0 };
@@ -118,7 +124,7 @@ export function predict({ sleeps, baby, settings = {}, now = Date.now() }) {
   return { ...base, ...predictAwake(last, env) };
 }
 
-function predictAwake(last, { now, norms, rhythm, policy, ctx, bed, wake, done }) {
+function predictAwake(last, { now, norms, rhythm, policy, ctx, bed, wake, done, strain }) {
   const t0 = last.end;
   const prevKind = last.kind === 'night' ? 'night' : 'nap';
   const prevLen = prevKind === 'nap' ? (last.end - last.start) / MIN : null;
@@ -155,6 +161,15 @@ function predictAwake(last, { now, norms, rhythm, policy, ctx, bed, wake, done }
   }
   if (rhythm.cueCount >= 2 && ctx.cueAt(h) < 0.97) {
     reasons.push(`She has fallen asleep early ${rhythm.cueCount} times lately, so windows around now are about ${pct(1 - ctx.cueAt(h))} shorter.`);
+  }
+
+  if (strain.relaxed) {
+    const why = strain.manual
+      ? `Rough-day mode is on${strain.manualReasons.length ? ` (${reasonLabels(strain.manualReasons).join(', ')})` : ''}`
+      : `Today has been rough (${strain.signals.join(', ')})`;
+    reasons.push(`${why}, so Napberry is being flexible: windows are a little shorter, naps can run long, an extra nap is fine, and bedtime may land later rather than cutting sleep short.`);
+  } else if (strain.signals.length) {
+    reasons.push(`Today has had ${strain.signals.join(' and ')}. Not enough yet to call it a rough day, but it counts toward one.`);
   }
 
   const bedItem = items[items.length - 1];
@@ -196,7 +211,11 @@ function predictAwake(last, { now, norms, rhythm, policy, ctx, bed, wake, done }
   };
 }
 
-function predictAsleep(ongoing, { now, norms, rhythm, policy, ctx, bed, wake, done }) {
+const LATE_BEDTIME = 20; // minutes past the target before waking her is even mentioned
+const HOLDS = 15; // "holds bedtime" means landing within this many minutes of the target
+const napCount = (items) => items.filter((i) => i.kind === 'nap').length;
+
+function predictAsleep(ongoing, { now, norms, rhythm, policy, ctx, bed, wake, done, strain }) {
   const elapsed = (now - ongoing.start) / MIN;
   const out = { mode: 'asleep', kind: ongoing.kind, since: ongoing.start, elapsed };
   const before = done.filter((s) => s.end <= ongoing.start);
@@ -212,14 +231,17 @@ function predictAsleep(ongoing, { now, norms, rhythm, policy, ctx, bed, wake, do
     if (wake) {
       const day = startOfDay(expectedWake);
       range = { targetMs: day + wake.targetMin * MIN, lowMs: day + wake.lowMin * MIN, highMs: day + wake.highMin * MIN };
-      wakeBy = range.highMs;
+      // After a rough day she can sleep on; nobody is asked to wake her to protect bedtime.
+      wakeBy = strain.relaxed ? null : range.highMs;
     } else if (policy.wakeBy) {
       wakeBy = latestWake({ kind: 'night', from: Math.max(now, expectedWake - 90 * MIN), around: expectedWake, bed: bedMs, ctx, policy });
     }
     const resume = Math.max(expectedWake, now);
     const after = decorate(planDay({ t0: resume, bed: bedMs, prevKind: 'night', napsDone: 0, ctx, policy }).items, ctx);
     const notes = [];
-    if (range) {
+    if (strain.relaxed && now >= (range ? range.lowMs : expectedWake) - 30 * MIN) {
+      notes.push("Let her sleep in if she needs it. After a rough day Napberry won't ask you to wake her; it plans the day from whenever she wakes.");
+    } else if (range) {
       if (now > range.highMs) notes.push(`Past the ${fmtClock(range.lowMs)}–${fmtClock(range.highMs)} target. Waking her now protects tonight's ${fmtClock(bedMs)} bedtime.`);
       else if (now >= range.lowMs) notes.push(`In the target wake range. Wake by ${fmtClock(range.highMs)} to protect tonight's bedtime.`);
       else notes.push(`Target wake ${fmtClock(range.targetMs)} (${fmtClock(range.lowMs)}–${fmtClock(range.highMs)}). Let her sleep until then.`);
@@ -232,7 +254,7 @@ function predictAsleep(ongoing, { now, norms, rhythm, policy, ctx, bed, wake, do
       expectedWake,
       wakeBy,
       wakeRange: range,
-      pastTarget: Boolean(range && now > range.highMs),
+      pastTarget: Boolean(range && now > range.highMs && !strain.relaxed),
       after,
       notes,
     };
@@ -240,17 +262,55 @@ function predictAsleep(ongoing, { now, norms, rhythm, policy, ctx, bed, wake, do
 
   const k = napsSoFar(before, ongoing.start);
   const typicalLen = ctx.napLength(hourOf(ongoing.start)) * policy.napBias;
-  let expectedWake = ongoing.start + typicalLen * MIN;
+  const typicalEnd = ongoing.start + typicalLen * MIN;
+  // The nap is never cut short in the plan. If she sleeps past the usual length, the rest of the day
+  // is recalculated from when she wakes: fewer naps, shorter ones, or a later bedtime.
+  const naturalWake = Math.max(typicalEnd, now);
   const bedMs = atTime(ongoing.start, bed.bedMin);
-  const wakeBy = policy.wakeBy ? latestWake({ start: ongoing.start, from: now, around: expectedWake, bed: bedMs, ctx, policy, napsDone: k }) : null;
-  const capped = wakeBy != null && wakeBy < expectedWake;
-  if (capped) expectedWake = wakeBy;
-  const resume = Math.max(expectedWake, now);
-  const after = decorate(
-    planDay({ t0: resume, bed: bedMs, prevLen: (resume - ongoing.start) / MIN, prevKind: 'nap', napsDone: k + 1, ctx, policy }).items,
-    ctx,
-  );
+  const planFrom = (t0) =>
+    planDay({ t0, bed: bedMs, prevLen: (t0 - ongoing.start) / MIN, prevKind: 'nap', napsDone: k + 1, ctx, policy });
+  const natural = planFrom(naturalWake);
+  const after = decorate(natural.items, ctx);
+  const bedItem = after[after.length - 1];
+
+  // Waking her is only ever a suggestion, and the last resort: it is offered only when letting her sleep
+  // on would push bedtime well past the target even after dropping naps and shortening the evening,
+  // she isn't having a rough day, and the family asked to protect bedtime. It says what sleeping on costs.
+  const late = bedItem.offset;
+  let wakeBy = null;
+  if (policy.wakeBy && late >= LATE_BEDTIME) {
+    const lo = Math.max(now, ongoing.start + 10 * MIN);
+    wakeBy = lo;
+    for (let e = Math.floor(naturalWake / (5 * MIN)) * 5 * MIN; e >= lo; e -= 5 * MIN) {
+      if (planFrom(e).landing - bedMs <= HOLDS * MIN) {
+        wakeBy = e;
+        break;
+      }
+    }
+  }
+
   const notes = [];
-  if (capped) notes.push(`Wake by ${fmtClock(wakeBy)} to protect tonight's ${fmtClock(bedMs)} bedtime.`);
-  return { ...out, napsSoFar: k, napNumber: k + 1, typicalLen, expectedWake, wakeBy, capped, after, notes };
+  if (wakeBy != null) {
+    notes.push(
+      `If she sleeps on, bedtime lands about ${fmtClock(bedItem.at)}, ${fmtDuration(late)} after your ${fmtClock(bedMs)} target. To hold ${fmtClock(bedMs)}, wake her by ${fmtClock(wakeBy)}.`,
+    );
+  } else if (strain.relaxed) {
+    notes.push(`Let her sleep. Rough day, so Napberry won't ask you to wake her to hold bedtime${late >= 15 ? `; it may land around ${fmtClock(bedItem.at)}` : ''}.`);
+  }
+  if (now > typicalEnd + 10 * MIN) {
+    const usual = planFrom(typicalEnd);
+    const fewer = napCount(usual.items) - napCount(after);
+    const later = (natural.landing - usual.landing) / MIN;
+    const changes = [];
+    if (fewer > 0) changes.push(fewer === 1 ? 'one fewer nap' : `${fewer} fewer naps`);
+    if (later >= 15) {
+      if (wakeBy == null) changes.push(`bedtime about ${fmtDuration(later)} later`); // the wake-by note above already says so
+    } else if (fewer <= 0) {
+      const usualNaps = usual.items.filter((i) => i.kind === 'nap').reduce((sum, i) => sum + i.len, 0);
+      const nowNaps = after.filter((i) => i.kind === 'nap').reduce((sum, i) => sum + i.len, 0);
+      if (usualNaps - nowNaps >= 10) changes.push('later naps a bit shorter');
+    }
+    if (changes.length) notes.push(`She's sleeping past the usual ${fmtDuration(typicalLen)}, so the rest of the day adjusts: ${changes.join(' and ')}.`);
+  }
+  return { ...out, napsSoFar: k, napNumber: k + 1, typicalLen, expectedWake: naturalWake, wakeBy, after, notes };
 }

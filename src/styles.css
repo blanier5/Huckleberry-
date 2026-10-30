@@ -525,9 +525,12 @@ input:disabled {
   align-items: center;
   justify-content: center;
   min-height: 48px;
+  padding: 4px 6px;
   border: 1.5px solid var(--line);
   border-radius: 12px;
   font-weight: 600;
+  text-align: center;
+  line-height: 1.2;
 }
 
 .seg input:checked + span {
@@ -795,4 +798,20 @@ textarea {
 
 a.btn {
   text-decoration: none;
+}
+
+/* ---------- rough days ---------- */
+
+.card.recovery {
+  border: 2px solid var(--accent);
+}
+
+.card.recovery .links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 16px;
+}
+
+.field > .check {
+  padding: 4px 0;
 }
