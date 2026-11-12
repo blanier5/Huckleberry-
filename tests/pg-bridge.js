@@ -4,19 +4,21 @@
 import fs from 'node:fs';
 
 const SETUP = fs.readFileSync(new URL('../supabase/setup.sql', import.meta.url), 'utf8');
+const PUSH = fs.readFileSync(new URL('../supabase/push.sql', import.meta.url), 'utf8');
 
 let shared; // PGlite takes seconds to boot, so one instance is reset and reused
 
-export async function createBackend({ url = 'http://localhost:54321', key = 'sb_publishable_testkey', install = true } = {}) {
+export async function createBackend({ url = 'http://localhost:54321', key = 'sb_publishable_testkey', install = true, push = false } = {}) {
   if (!shared) {
     const { PGlite } = await import('@electric-sql/pglite');
     shared = new PGlite();
-    await shared.exec('create role anon nologin; create role authenticated nologin;');
+    await shared.exec('create role anon nologin; create role authenticated nologin; create role service_role nologin;');
   }
   const db = shared;
   // Start from a blank database each time (like a brand-new Supabase project).
   await db.exec('reset role; drop schema public cascade; create schema public; grant usage on schema public to public;');
   if (install) await db.exec(SETUP);
+  if (install && push) await db.exec(PUSH); // the optional nap-alerts script (supabase/push.sql)
   await db.exec('set role anon');
 
   const backend = {
@@ -24,6 +26,32 @@ export async function createBackend({ url = 'http://localhost:54321', key = 'sb_
     key,
     db,
     down: false, // simulate no connectivity
+    /** Run SQL as the database owner (the tables are locked to everyone else), then go back to being `anon`. */
+    async admin(sql, params = []) {
+      await db.exec('reset role');
+      try {
+        if (params.length) return await db.query(sql, params);
+        const results = await db.exec(sql); // no parameters: may be a whole script
+        return results[results.length - 1];
+      } finally {
+        await db.exec('set role anon');
+      }
+    },
+    /** Call a function the way the Edge Function does: as the service role. */
+    async service(name, args) {
+      await db.exec('reset role; set role service_role');
+      try {
+        const keys = Object.keys(args);
+        const isObj = (v) => v !== null && typeof v === 'object';
+        const res = await db.query(
+          `select public.${name}(${keys.map((k, i) => `${k} => $${i + 1}${isObj(args[k]) ? '::jsonb' : ''}`).join(', ')}) as r`,
+          keys.map((k) => (isObj(args[k]) ? JSON.stringify(args[k]) : args[k])),
+        );
+        return res.rows[0].r;
+      } finally {
+        await db.exec('reset role; set role anon');
+      }
+    },
     calls: [],
     /** fetch()-compatible handler for `${url}/rest/v1/rpc/<function>` */
     async fetch(input, init = {}) {
