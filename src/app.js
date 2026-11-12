@@ -6,6 +6,7 @@ import { createSync, parseInvite } from './sync.js';
 import { PRIORITIES } from './planner.js';
 import { PACES, RANGES, DEFAULT_PACE, recentBedtime, recentWake } from './shift.js';
 import { REASONS, SETTLE_LABELS, activeRecovery, reasonLabels } from './recovery.js';
+import { createAlerts } from './alerts.js';
 import {
   MIN,
   startOfDay,
@@ -25,6 +26,7 @@ import {
 
 const store = createStore();
 const sync = createSync({ store });
+const alerts = createAlerts({ store, sync, predict: (now) => prediction(now) });
 const ui = { tab: 'today', historyDays: 14, whyOpen: false, quiet: false, dirty: false, preview: null, joining: null, joinText: '', prevBedtime: null };
 
 const $ = (id) => document.getElementById(id);
@@ -453,6 +455,95 @@ function viewScheduleCard() {
 }
 
 /** Shown (and the Settings tab gets a dot) until the Supabase script has been re-run. */
+/** Nap alerts: setup steps until the family's Supabase project is ready, then a switch for this phone. */
+function viewAlertsCard() {
+  const intro = 'Get a notification on this phone when a nap sweet spot starts, even with Napberry closed.';
+  if (!sync.enabled) {
+    return `
+    <section class="card" id="alerts">
+      <h2>Nap alerts</h2>
+      <p class="muted small">${intro} Alerts are sent from your own Supabase project, so turn on sync above first.</p>
+    </section>`;
+  }
+  const a = alerts.state;
+  const note = a.message ? `<p class="small" role="status" style="margin-top:10px">${esc(a.message)}</p>` : '';
+  const sqlEditor = sync.sqlEditorUrl();
+  const functions = sync.functionsUrl();
+  const link = (href, label) => (href ? `<a class="btn secondary" href="${esc(href)}" target="_blank" rel="noopener">${label}</a>` : '');
+
+  if (a.phase === 'checking') {
+    return `<section class="card" id="alerts"><h2>Nap alerts</h2><p class="muted small">${intro}</p><p class="small" role="status">Checking your Supabase project…</p>${note}</section>`;
+  }
+  if (a.phase === 'needs-db') {
+    return `
+    <section class="card" id="alerts">
+      <h2>Nap alerts: setup, step 1 of 2</h2>
+      <p class="muted small">${intro} It needs a one-time setup in your Supabase project (about 10 minutes, ideally on a computer). First, the database part:</p>
+      <ol class="small steps">
+        <li>Tap <b>Copy the alerts SQL</b>.</li>
+        <li>Open your project's <b>SQL Editor</b>, paste, and press <b>Run</b>.</li>
+        <li>Come back here and tap <b>Check again</b>.</li>
+      </ol>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-action="copy-push-sql">Copy the alerts SQL</button>
+        ${link(sqlEditor, 'Open SQL Editor')}
+      </div>
+      <div class="dialog-actions"><button type="button" class="btn secondary" data-action="alerts-check">Check again</button></div>
+      ${note}
+    </section>`;
+  }
+  if (a.phase === 'needs-function') {
+    return `
+    <section class="card" id="alerts">
+      <h2>Nap alerts: setup, step 2 of 2</h2>
+      <p class="muted small">The database part is done. Now the small function that sends the notifications:</p>
+      <ol class="small steps">
+        <li>Tap <b>Copy the function code</b>.</li>
+        <li>In Supabase open <b>Edge Functions</b>, choose <b>Deploy a new function</b>, then <b>Via Editor</b>.</li>
+        <li>Delete the sample code, paste, and name the function exactly <b>napberry-push</b>. Press <b>Deploy</b>.</li>
+        <li>Open the function's settings and turn <b>off</b> "Verify JWT" (the schedule calls it with its own secret instead).</li>
+        <li>Wait a minute, then tap <b>Check again</b>. If this step doesn't clear, see "Nap alerts" in the README.</li>
+      </ol>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-action="copy-push-fn">Copy the function code</button>
+        ${link(functions, 'Open Edge Functions')}
+      </div>
+      <div class="dialog-actions"><button type="button" class="btn secondary" data-action="alerts-check">Check again</button></div>
+      ${note}
+    </section>`;
+  }
+  if (a.phase === 'ready' || a.phase === 'on') {
+    const unsupported = {
+      'ios-install': 'On iPhone, notifications only work for apps on the Home Screen. In Safari tap Share, then <b>Add to Home Screen</b>, open Napberry from that icon, and come back to this screen.',
+      'ios-old': 'Notifications for Home Screen apps need iOS 16.4 or newer. Update iOS, then come back to this screen.',
+      unsupported: "This browser can't receive notifications from Napberry. On Android, try Chrome.",
+    }[a.support];
+    if (a.phase === 'ready' && unsupported) {
+      return `<section class="card" id="alerts"><h2>Nap alerts</h2><p class="muted small">${intro}</p><p class="small">${unsupported}</p>${note}</section>`;
+    }
+    if (a.phase === 'ready') {
+      return `
+    <section class="card" id="alerts">
+      <h2>Nap alerts</h2>
+      <p class="muted small">${intro} Every phone chooses for itself, and they all share one schedule: when anyone logs a wake-up, each phone that has alerts on is told when the sweet spot starts.</p>
+      <button type="button" class="btn" data-action="alerts-on" ${a.busy ? 'disabled' : ''}>Turn on nap alerts</button>
+      ${note}
+    </section>`;
+    }
+    return `
+    <section class="card" id="alerts">
+      <h2>Nap alerts</h2>
+      <p class="small" role="status">Nap alerts are <b>on</b> for this phone. It will be notified when a nap sweet spot starts, and not while ${esc(store.state.baby?.name || 'baby')} is asleep.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn secondary" data-action="alerts-test" ${a.busy ? 'disabled' : ''}>Test alert</button>
+        <button type="button" class="btn danger" data-action="alerts-off" ${a.busy ? 'disabled' : ''}>Turn off here</button>
+      </div>
+      ${note}
+    </section>`;
+  }
+  return '';
+}
+
 function viewDbNotice() {
   if (!sync.dbOutdated) return '';
   const editor = sync.sqlEditorUrl();
@@ -486,6 +577,8 @@ function viewSettings() {
     ${viewScheduleCard()}
 
     ${viewSyncCard()}
+
+    ${viewAlertsCard()}
 
     <section class="card">
       <h2>Import from Huckleberry</h2>
@@ -878,6 +971,7 @@ const actions = {
     ui.tab = el.dataset.tab;
     render();
     window.scrollTo(0, 0);
+    if (ui.tab === 'settings') alerts.refresh(); // the Supabase setup may have been finished since last time
   },
   start: (el) => {
     if (!store.startSleep(el.dataset.kind)) toast('A sleep is already in progress.');
@@ -915,6 +1009,15 @@ const actions = {
   settle: (el) => openSettle(el.dataset.id),
   'rough-day': openRoughDay,
   'rough-day-off': () => rough(null, 'Back to the usual plan'),
+  'alerts-on': () => alerts.enable(),
+  'alerts-off': () => alerts.disable(),
+  'alerts-test': () => alerts.test(),
+  'alerts-check': async () => {
+    await alerts.refresh();
+    if (alerts.state.phase === 'needs-db' || alerts.state.phase === 'needs-function') toast('Not ready yet. Give it a minute and check again.');
+  },
+  'copy-push-sql': () => copySetupFile('supabase/push.sql', 'Alerts SQL', 'Select all, copy, then paste it into the Supabase SQL Editor and press Run.', (sql) => sql.replaceAll('__PROJECT_URL__', sync.projectUrl ?? '__PROJECT_URL__')),
+  'copy-push-fn': () => copySetupFile('supabase/functions/napberry-push/index.ts', 'Function code', 'Select all, copy, then paste it into the Edge Function editor in Supabase.'),
   'start-early': () => {
     const p = prediction();
     const planned = p.mode === 'awake' && p.next.kind === 'nap' ? p.next.at : undefined;
@@ -969,6 +1072,21 @@ const actions = {
     else showInviteDialog();
   },
 };
+
+/** Fetch a file the Supabase setup needs from this site and put it on the clipboard (with a select-all fallback). */
+async function copySetupFile(path, title, hint, adjust = (text) => text) {
+  let text;
+  try {
+    const res = await fetch(path, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(String(res.status));
+    text = adjust(await res.text());
+  } catch {
+    toast("Couldn't load it. Check your connection and try again.");
+    return;
+  }
+  if (await copyText(text)) toast(`Copied. ${title === 'Function code' ? 'Paste it into the Edge Function editor.' : 'Paste it into the Supabase SQL Editor and press Run.'}`);
+  else showTextDialog(title, hint, text);
+}
 
 const inviteLink = () => `${location.origin}${location.pathname}#join=${sync.invite()}`;
 
@@ -1111,6 +1229,10 @@ document.addEventListener('focusout', () => {
   }, 0);
 });
 
+alerts.onChange(() => {
+  if (ui.tab === 'settings' && store.state.baby && !editingInMain()) renderMain();
+});
+
 let lastDbOutdated = false;
 sync.onChange(() => {
   renderHeader();
@@ -1158,6 +1280,8 @@ else {
     render();
   }
 }
+
+alerts.start();
 
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

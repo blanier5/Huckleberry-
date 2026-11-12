@@ -112,6 +112,13 @@ export function createRemote({ url, key, fetch = globalThis.fetch.bind(globalThi
   return {
     pull: (family, cursor) => rpc('naps_pull', { p_family: family, p_cursor: cursor }),
     push: (family, profile, sleeps) => rpc('naps_push', { p_family: family, p_profile: profile, p_sleeps: sleeps }),
+    // Nap alerts (supabase/push.sql, optional). A 'setup' error from these means that script hasn't been run.
+    pushKey: () => rpc('naps_push_key', {}),
+    pushSubscribe: (family, subscription) => rpc('naps_push_subscribe', { p_family: family, p_sub: subscription }),
+    pushUnsubscribe: (family, endpoint) => rpc('naps_push_unsubscribe', { p_family: family, p_endpoint: endpoint }),
+    alertSet: (family, kind, fireAt, title, body, basis) =>
+      rpc('naps_alert_set', { p_family: family, p_kind: kind, p_fire_at: fireAt, p_title: title, p_body: body, p_basis: basis }),
+    alertClear: (family, kind, basis) => rpc('naps_alert_clear', { p_family: family, p_kind: kind, p_basis: basis }),
   };
 }
 
@@ -161,6 +168,15 @@ export function createSync({
       else storage?.removeItem(CONFIG_KEY);
     } catch {
       /* ignore */
+    }
+  };
+
+  const dashboardUrl = (path) => {
+    try {
+      const host = new URL(cfg.url).hostname;
+      return host.endsWith('.supabase.co') ? `https://supabase.com/dashboard/project/${host.split('.')[0]}/${path}` : null;
+    } catch {
+      return null;
     }
   };
 
@@ -258,12 +274,22 @@ export function createSync({
     },
     /** Link to the SQL editor of the connected Supabase project (null for non-Supabase URLs). */
     sqlEditorUrl() {
-      try {
-        const host = new URL(cfg.url).hostname;
-        return host.endsWith('.supabase.co') ? `https://supabase.com/dashboard/project/${host.split('.')[0]}/sql/new` : null;
-      } catch {
-        return null;
-      }
+      return dashboardUrl('sql/new');
+    },
+    /** Link to the Edge Functions page of the connected Supabase project (null for non-Supabase URLs). */
+    functionsUrl() {
+      return dashboardUrl('functions');
+    },
+    /** The connected project's address, like https://abcdxyz.supabase.co (null when sync is off). */
+    get projectUrl() {
+      return cfg ? cfg.url : null;
+    },
+    /** Server calls for the connected project (null when sync is off). */
+    get remote() {
+      return remote;
+    },
+    get family() {
+      return cfg ? cfg.family : null;
     },
     get enabled() {
       return Boolean(cfg);

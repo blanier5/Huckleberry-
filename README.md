@@ -6,6 +6,7 @@ A small, offline-capable nap tracker with Huckleberry-style **nap and bedtime re
 - **Recommendations that learn.** The next nap or bedtime comes with a *sweet spot* window, a countdown, a plan for the rest of the day, and a "Why this time?" explanation.
 - **Huckleberry import.** Load a Huckleberry CSV export, see a summary first, and re-importing never creates duplicates.
 - **Private and installable.** Plain HTML/JS. Data stays in the browser on your device. Add it to your home screen and it works offline.
+- **Optional nap alerts.** A notification on a phone when the nap sweet spot starts, even with Napberry closed (Stephanie turns it on for hers). See [Nap alerts](#nap-alerts-optional).
 - **Optional sync between phones.** Both parents share one baby profile and sleep log, with nothing to re-type on a new phone. See [Sync between phones](#sync-between-phones-optional).
 
 > General guidance only, not medical advice. Follow your baby's cues and your pediatrician.
@@ -95,6 +96,27 @@ It uses **your own free Supabase project** as the shared memory (Napberry has no
 
 **Costs and limits.** Everything fits easily within Supabase's free plan, and no card is needed. Supabase has paused inactive free projects after a period of no use; if sync ever reports an error after a long break, open the project in the Supabase dashboard and restore it. **Erase all data** only erases the phone you're holding, and turns sync off there. The synced copy stays, and you can rejoin with the invite.
 
+## Nap alerts (optional)
+
+A notification on a phone when a nap's sweet spot starts, for example *"Scottie's nap sweet spot is starting. Nap 3: sweet spot 12:52–1:28 PM, best around 1:10 PM. Scottie woke at 12:05 PM."* Each phone chooses for itself in **Settings → Nap alerts**, so one parent can have them and the other not. Nothing is sent while she is asleep or when bedtime is next, and a nap you start early cancels the alert.
+
+**What it needs.** Sync turned on (alerts come from your own Supabase project), and on an iPhone: iOS 16.4 or newer, with Napberry **added to the Home Screen** (in Safari tap Share, then *Add to Home Screen*) and opened from that icon. A Safari tab can't receive notifications. On Android, Chrome works.
+
+**One-time setup (about 10 minutes, ideally on a computer).** Settings → Nap alerts walks through it, with Copy buttons for both pieces:
+
+1. **The database part.** Tap *Copy the alerts SQL* (it fills in your project URL), open the Supabase **SQL Editor**, paste, and **Run**. This is [`supabase/push.sql`](supabase/push.sql). It adds a few locked tables and functions, and a schedule that checks every minute whether an alert is due. It turns on Supabase's `pg_cron` and `pg_net` extensions (both are on the free plan); if it prints a warning that it couldn't, turn them on under **Database → Extensions** and run it again. It never touches your sleep data, and running it twice is harmless.
+2. **The sending part.** Tap *Copy the function code*. In Supabase open **Edge Functions → Deploy a new function → Via Editor**, delete the sample, paste, name it exactly **`napberry-push`**, and **Deploy**. Then open that function's settings and turn **off "Verify JWT"** (the schedule proves who it is with a secret kept in your database instead). The code is [`supabase/functions/napberry-push/index.ts`](supabase/functions/napberry-push/index.ts). It uses no libraries.
+3. Back in Napberry, tap **Check again**. Within a minute the function makes the notification key, and the card changes to **Turn on nap alerts**. On each phone that should get alerts, tap it and allow notifications, then tap **Test alert**. It should arrive within a minute.
+
+**How it works.** Whenever a phone logs something, it works out when the next sweet spot starts (the same prediction as Today) and leaves one note about it in your project: "tell this family at 12:52". A note based on older data never replaces one based on newer data, so a phone that hasn't caught up can't bring back an alert that was cancelled. Every minute the database looks for notes that are due and, only then, wakes the function, which sends the notification to each phone that turned alerts on. A late alert (more than 15 minutes) is dropped rather than shown. The message is encrypted end to end between the function and the phone and travels through Apple's or Google's push service, so those services carry it but can't read it.
+
+**If something doesn't work.**
+- *Step 2 won't clear after a few minutes.* Check the function is named exactly `napberry-push`, and that **Verify JWT** is off (Edge Functions → `napberry-push` → Logs shows a 401 if it's still on). Check Database → Extensions has `pg_cron` and `pg_net` on, and that **Integrations → Cron** lists a job called `napberry-alerts`.
+- *The test alert never arrives.* Look at the function's Logs: it prints what the push service answered. On iPhone, make sure Napberry is allowed under Settings → Notifications and that a Focus mode isn't hiding it. If you turned alerts on before step 2 was finished, turn them off and on again.
+- *You moved Supabase projects or reset it.* Turn alerts off and on again on each phone.
+
+**Costs and limits.** Everything fits easily in Supabase's free plan: the function only runs when an alert is due, and each family can have up to 10 phones. This is general guidance, not an alarm clock: sweet spots are best guesses, and delivery depends on Apple's or Google's push service.
+
 ## Your data
 
 Everything is stored in the browser's local storage on **this device**, plus your Supabase project if you turn on sync. **Settings → Backup & sharing** exports a JSON file; importing one *merges* it (it never overwrites), which is a no-account way to move data between phones.
@@ -105,6 +127,7 @@ Everything is stored in the browser's local storage on **this device**, plus you
 index.html, manifest.webmanifest, sw.js   app shell, PWA manifest, offline cache
 src/app.js         UI: views, dialogs, events
 src/predict.js     builds a prediction from the log and settings (pure function)
+src/alerts.js      nap alerts: what to tell the phones, and turning alerts on or off for this phone
 src/recovery.js    rough days: how strained today has been, rough-day mode, relaxed planning
 src/planner.js     fits naps and a bridge nap between her last wake and bedtime
 src/learn.js       her rhythm by time of day, nap quality, rough nights, early notes
@@ -116,6 +139,8 @@ src/huckleberry.js, src/csv.js   CSV import
 src/store.js       local-first storage: merge/dedupe, change tracking, backup
 src/sync.js        optional sync: Supabase client, invites, sync engine
 supabase/setup.sql the database for sync (tables locked down; two functions)
+supabase/push.sql  optional: the database part of nap alerts, plus the minute-by-minute schedule
+supabase/functions/napberry-push/index.ts   optional: the function that sends the notifications
 tests/             node:test suites, a synthetic-history generator, and a
                    Postgres-backed stand-in for Supabase (needs `npm install`)
 ```
