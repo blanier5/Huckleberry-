@@ -82,6 +82,7 @@ export function createAlerts({ store, sync, predict, env = { win: globalThis.win
   let timer = null;
   let last = null; // what was last sent for this data, so an unchanged note isn't sent again
   let blockedUntil = 0; // the database script isn't installed: don't keep asking
+  let urlSent = false; // the project address has been given to the database this session
   let started = false;
 
   async function registration() {
@@ -116,6 +117,12 @@ export function createAlerts({ store, sync, predict, env = { win: globalThis.win
       return set({ message: explain(err) });
     }
     blockedUntil = 0;
+    // Tell the database which project this is, so its schedule knows where the sending function lives.
+    // (Anything but a supabase.co address is refused, which is fine: those can't use alerts.)
+    if (!urlSent) {
+      urlSent = true;
+      sync.remote.pushSetUrl(sync.family, sync.projectUrl).catch(() => {});
+    }
     if (!key) return set({ phase: 'needs-function', message: '' });
     const reg = state.support === 'ok' ? await registration() : null;
     const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
@@ -252,6 +259,7 @@ export function createAlerts({ store, sync, predict, env = { win: globalThis.win
         if (sync.enabled !== wasEnabled) {
           wasEnabled = sync.enabled;
           last = null;
+          urlSent = false;
           refresh();
         }
         scheduleSoon();

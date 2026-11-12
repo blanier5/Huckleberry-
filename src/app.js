@@ -481,7 +481,7 @@ function viewAlertsCard() {
       <p class="muted small">${intro} It needs a one-time setup in your Supabase project (about 10 minutes, ideally on a computer). First, the database part:</p>
       <ol class="small steps">
         <li>Tap <b>Copy the alerts SQL</b>.</li>
-        <li>Open your project's <b>SQL Editor</b>, paste, and press <b>Run</b>.</li>
+        <li>Open your project's <b>SQL Editor</b>, paste it all (nothing to edit), and press <b>Run</b>.</li>
         <li>Come back here and tap <b>Check again</b>.</li>
       </ol>
       <div class="dialog-actions">
@@ -498,9 +498,9 @@ function viewAlertsCard() {
       <h2>Nap alerts: setup, step 2 of 2</h2>
       <p class="muted small">The database part is done. Now the small function that sends the notifications:</p>
       <ol class="small steps">
-        <li>Tap <b>Copy the function code</b>.</li>
+        <li>Tap <b>Copy the function code</b>. This is different from the SQL in step 1: it starts with <code>//</code>.</li>
         <li>In Supabase open <b>Edge Functions</b>, choose <b>Deploy a new function</b>, then <b>Via Editor</b>.</li>
-        <li>Delete the sample code, paste, and name the function exactly <b>napberry-push</b>. Press <b>Deploy</b>.</li>
+        <li>Delete the sample code, paste, and name the function exactly <b>napberry-push</b> (all lowercase). Press <b>Deploy</b>.</li>
         <li>Open the function's settings and turn <b>off</b> "Verify JWT" (the schedule calls it with its own secret instead).</li>
         <li>Wait a minute, then tap <b>Check again</b>. If this step doesn't clear, see "Nap alerts" in the README.</li>
       </ol>
@@ -1016,7 +1016,7 @@ const actions = {
     await alerts.refresh();
     if (alerts.state.phase === 'needs-db' || alerts.state.phase === 'needs-function') toast('Not ready yet. Give it a minute and check again.');
   },
-  'copy-push-sql': () => copySetupFile('supabase/push.sql', 'Alerts SQL', 'Select all, copy, then paste it into the Supabase SQL Editor and press Run.', (sql) => sql.replaceAll('__PROJECT_URL__', sync.projectUrl ?? '__PROJECT_URL__')),
+  'copy-push-sql': () => copySetupFile('supabase/push.sql', 'Alerts SQL', 'Select all, copy, then paste it into the Supabase SQL Editor and press Run.'),
   'copy-push-fn': () => copySetupFile('supabase/functions/napberry-push/index.ts', 'Function code', 'Select all, copy, then paste it into the Edge Function editor in Supabase.'),
   'start-early': () => {
     const p = prediction();

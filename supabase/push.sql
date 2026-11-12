@@ -1,5 +1,6 @@
 -- Napberry nap alerts (optional). Paste this whole file into Supabase -> SQL Editor -> Run,
--- after supabase/setup.sql. Safe to run more than once, and it never touches your sleep data.
+-- after supabase/setup.sql. There is nothing in it to edit. Safe to run more than once, and it
+-- never touches your sleep data.
 --
 -- How alerts work: when a phone logs a wake-up, Napberry works out when the nap sweet spot
 -- starts and leaves a single note here ("tell this family at 12:52"). Every minute a small
@@ -14,8 +15,10 @@ create table if not exists public.naps_push_config (
   id            int primary key check (id = 1),
   vapid_public  text,   -- made by the Edge Function the first time it runs
   vapid_private text,
-  tick_secret   text not null
+  tick_secret   text not null,
+  project_url   text    -- told to us by the app, so the schedule knows where the function lives
 );
+alter table public.naps_push_config add column if not exists project_url text;
 insert into public.naps_push_config (id, tick_secret)
 values (1, replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', ''))
 on conflict (id) do nothing;
@@ -60,6 +63,26 @@ stable
 security definer
 set search_path = public
 as $$ select vapid_public from public.naps_push_config where id = 1 $$;
+
+-- The app tells the database which project this is (like https://abcdxyz.supabase.co), so the
+-- schedule below knows where the Edge Function lives. It only accepts a supabase.co address.
+create or replace function public.naps_push_set_url(p_family text, p_url text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if p_family is null or p_family !~ '^[A-Za-z0-9_-]{20,64}$' then
+    raise exception 'invalid family code' using errcode = '22023';
+  end if;
+  if p_url is null or p_url !~ '^https://[a-z0-9]{10,40}\.supabase\.co$' then
+    raise exception 'invalid project url' using errcode = '22023';
+  end if;
+  update naps_push_config set project_url = p_url where id = 1 and project_url is distinct from p_url;
+  return jsonb_build_object('ok', true);
+end;
+$$;
 
 -- A phone says "send my alerts here".
 create or replace function public.naps_push_subscribe(p_family text, p_sub jsonb)
@@ -266,6 +289,7 @@ end;
 $$;
 
 revoke all on function public.naps_push_key() from public;
+revoke all on function public.naps_push_set_url(text, text) from public;
 revoke all on function public.naps_push_subscribe(text, jsonb) from public;
 revoke all on function public.naps_push_unsubscribe(text, text) from public;
 revoke all on function public.naps_alert_set(text, text, bigint, text, text, bigint) from public;
@@ -274,6 +298,7 @@ revoke all on function public.naps_alerts_claim(text) from public, anon, authent
 revoke all on function public.naps_push_keys_set(text, text, text) from public, anon, authenticated;
 revoke all on function public.naps_push_forget(text, jsonb) from public, anon, authenticated;
 grant execute on function public.naps_push_key() to anon, authenticated;
+grant execute on function public.naps_push_set_url(text, text) to anon, authenticated;
 grant execute on function public.naps_push_subscribe(text, jsonb) to anon, authenticated;
 grant execute on function public.naps_push_unsubscribe(text, text) to anon, authenticated;
 grant execute on function public.naps_alert_set(text, text, bigint, text, text, bigint) to anon, authenticated;
@@ -291,19 +316,11 @@ notify pgrst, 'reload schema';
 
 -- ---------------------------------------------------------------------------------------
 -- The schedule: every minute, wake the Edge Function, but only if something is due (or the
--- push key still has to be made). Needs the pg_cron and pg_net extensions, which this tries
--- to turn on. Napberry's Copy button fills in your project URL below; if you paste this file
--- by hand, replace the placeholder with your own, like https://abcdxyz.supabase.co
+-- push key still has to be made), and only once the app has said which project this is.
+-- Needs the pg_cron and pg_net extensions, which this tries to turn on.
 -- ---------------------------------------------------------------------------------------
 do $$
-declare
-  v_url text := '__PROJECT_URL__';
 begin
-  if position('__PROJECT' || '_URL__' in v_url) > 0 then
-    raise warning 'Napberry: the project URL was not filled in, so the schedule was not created. Copy this script from Napberry (Settings, Nap alerts), or replace the placeholder with your project URL (https://abcdxyz.supabase.co) and run it again.';
-    return;
-  end if;
-
   begin
     create extension if not exists pg_cron;
     create extension if not exists pg_net;
@@ -314,20 +331,19 @@ begin
   perform cron.schedule(
     'napberry-alerts',
     '* * * * *',
-    format(
-      $job$select net.http_post(
-             url := %L,
-             headers := jsonb_build_object('Content-Type', 'application/json',
-                                           'x-napberry-secret', (select tick_secret from public.naps_push_config where id = 1)),
-             body := '{}'::jsonb,
-             timeout_milliseconds := 30000)
-           where exists (select 1 from public.naps_alerts
-                          where active and sent_at is null
-                            and fire_at <= (extract(epoch from clock_timestamp()) * 1000)::bigint
-                            and fire_at >  (extract(epoch from clock_timestamp()) * 1000)::bigint - 900000)
-              or exists (select 1 from public.naps_push_config where id = 1 and vapid_public is null)$job$,
-      rtrim(v_url, '/') || '/functions/v1/napberry-push'
-    )
+    $job$select net.http_post(
+           url := c.project_url || '/functions/v1/napberry-push',
+           headers := jsonb_build_object('Content-Type', 'application/json', 'x-napberry-secret', c.tick_secret),
+           body := '{}'::jsonb,
+           timeout_milliseconds := 30000)
+         from public.naps_push_config c
+         where c.id = 1
+           and c.project_url is not null
+           and (c.vapid_public is null
+                or exists (select 1 from public.naps_alerts
+                            where active and sent_at is null
+                              and fire_at <= (extract(epoch from clock_timestamp()) * 1000)::bigint
+                              and fire_at >  (extract(epoch from clock_timestamp()) * 1000)::bigint - 900000))$job$
   );
 exception when others then
   raise warning 'Napberry: the schedule was not created (%). Turn on pg_cron and pg_net under Database -> Extensions, then run this script again.', sqlerrm;

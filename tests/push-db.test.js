@@ -204,9 +204,24 @@ test('late, cancelled and unwanted alerts are not sent', { skip }, async () => {
   assert.deepEqual(await backend.service('naps_push_forget', { p_secret: 'wrong', p_endpoints: ['x'] }), { ok: false });
 });
 
-test('the schedule: refuses an unfilled URL, survives missing extensions, and only calls out when something is due', { skip }, async () => {
+test('the app tells the database which project this is, and only a supabase.co address is accepted', { skip }, async () => {
   await fresh();
-  // Plain script: the placeholder was not replaced, so no schedule is made, and the rest is fine.
+  const setUrl = (url, fam = FAM) => q('select public.naps_push_set_url($1, $2) as r', [fam, url]);
+  const stored = async () => (await backend.admin('select project_url from public.naps_push_config')).rows[0].project_url;
+  assert.equal(await stored(), null);
+  assert.deepEqual(await setUrl('https://ipwwbfllwsczdhjyqtlq.supabase.co'), { ok: true });
+  assert.equal(await stored(), 'https://ipwwbfllwsczdhjyqtlq.supabase.co');
+  await setUrl('https://ipwwbfllwsczdhjyqtlq.supabase.co'); // again: nothing changes
+  for (const bad of ['http://ipwwbfllwsczdhjyqtlq.supabase.co', 'https://ipwwbfllwsczdhjyqtlq.supabase.co/', 'https://ipwwbfllwsczdhjyqtlq.supabase.co/functions', 'https://evil.example.com', 'https://abc.supabase.co', 'https://ipwwbfllwsczdhjyqtlq.supabase.co.evil.com', 'https://IPWWBFLLWSCZDHJYQTLQ.supabase.co', null]) {
+    await assert.rejects(setUrl(bad), /invalid project url/, String(bad));
+  }
+  await assert.rejects(setUrl('https://ipwwbfllwsczdhjyqtlq.supabase.co', 'short'), /invalid family code/);
+  assert.equal(await stored(), 'https://ipwwbfllwsczdhjyqtlq.supabase.co', 'rejected values change nothing');
+});
+
+test('the schedule: needs no editing, survives missing extensions, waits for the project address, and only calls out when something is due', { skip }, async () => {
+  await fresh();
+  // The script as it stands, with no pg_cron or pg_net on this database: it still completes.
   await backend.admin(PUSH);
 
   // Stand-ins for pg_cron and pg_net, to see what the schedule would do every minute.
@@ -219,22 +234,22 @@ test('the schedule: refuses an unfilled URL, survives missing extensions, and on
     create function net.http_post(url text, headers jsonb, body jsonb, timeout_milliseconds int) returns bigint language sql as $$ insert into public.hits values (url, headers, body, timeout_milliseconds) returning 1::bigint $$;
   `);
   await backend.admin(PUSH);
-  assert.equal((await backend.admin('select count(*)::int as n from public.sched')).rows[0].n, 0, 'no URL, no schedule');
-
-  await backend.admin(PUSH.replace('__PROJECT_URL__', 'https://abcdxyz.supabase.co/'));
-  await backend.admin(PUSH.replace('__PROJECT_URL__', 'https://abcdxyz.supabase.co/'));
+  await backend.admin(PUSH);
   const jobs = (await backend.admin('select * from public.sched')).rows;
   assert.equal(jobs.length, 2, 'cron.schedule is called each run (pg_cron replaces a job of the same name)');
   assert.equal(jobs[0].name, 'napberry-alerts');
   assert.equal(jobs[0].schedule, '* * * * *');
   const command = jobs[0].command;
-  assert.match(command, /'https:\/\/abcdxyz\.supabase\.co\/functions\/v1\/napberry-push'/);
 
   const hits = async () => (await backend.admin('select * from public.hits')).rows;
   await backend.admin(command);
+  assert.equal((await hits()).length, 0, 'the app has not said where the function lives yet');
+
+  await q('select public.naps_push_set_url($1, $2) as r', [FAM, 'https://abcdefghijklmnopqrst.supabase.co']);
+  await backend.admin(command);
   const boot = await hits();
   assert.equal(boot.length, 1, 'before the push key exists it wakes the function so it can make one');
-  assert.equal(boot[0].url, 'https://abcdxyz.supabase.co/functions/v1/napberry-push');
+  assert.equal(boot[0].url, 'https://abcdefghijklmnopqrst.supabase.co/functions/v1/napberry-push');
   assert.equal(boot[0].headers['x-napberry-secret'], secret);
   assert.equal(boot[0].timeout, 30000);
 
@@ -252,4 +267,16 @@ test('the schedule: refuses an unfilled URL, survives missing extensions, and on
   await backend.admin('delete from public.hits');
   await backend.admin(command);
   assert.equal((await hits()).length, 0, 'sent: quiet again');
+});
+
+test('a database that already has the first version of the script is upgraded in place', { skip }, async () => {
+  await fresh();
+  // The first version had no project_url column. Put it back to that shape, with data in it.
+  await setKeys();
+  await subscribe(sub('a'));
+  await backend.admin('alter table public.naps_push_config drop column project_url');
+  await backend.admin(PUSH);
+  assert.equal((await backend.admin('select project_url from public.naps_push_config')).rows[0].project_url, null);
+  assert.equal(await q('select public.naps_push_key() as r'), PUB, 'the key survived');
+  assert.equal((await backend.admin('select count(*)::int as n from public.naps_push_subs')).rows[0].n, 1);
 });
