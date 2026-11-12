@@ -114,6 +114,7 @@ export function createRemote({ url, key, fetch = globalThis.fetch.bind(globalThi
     push: (family, profile, sleeps) => rpc('naps_push', { p_family: family, p_profile: profile, p_sleeps: sleeps }),
     // Nap alerts (supabase/push.sql, optional). A 'setup' error from these means that script hasn't been run.
     pushKey: () => rpc('naps_push_key', {}),
+    pushSetUrl: (family, url) => rpc('naps_push_set_url', { p_family: family, p_url: url }),
     pushSubscribe: (family, subscription) => rpc('naps_push_subscribe', { p_family: family, p_sub: subscription }),
     pushUnsubscribe: (family, endpoint) => rpc('naps_push_unsubscribe', { p_family: family, p_endpoint: endpoint }),
     alertSet: (family, kind, fireAt, title, body, basis) =>

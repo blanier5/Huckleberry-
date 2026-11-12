@@ -189,6 +189,22 @@ test('before the database script is run, the card asks for step 1 and the phone 
   assert.equal(backend.calls.length, before, 'no repeated calls to something that is not installed');
 });
 
+test('the phone gives the database the project address, so nobody has to type it into SQL', { skip }, async () => {
+  const url = 'https://abcdefghijklmnopqrst.supabase.co';
+  const backend = await createBackend({ url, push: true });
+  const p = phone(backend);
+  p.store.setBaby({ name: 'Scottie', birth: at(2026, 7, 30) });
+  await p.sync.enable({ url, key: 'sb_publishable_testkey' });
+  assert.equal((await rows(backend, 'select project_url from public.naps_push_config'))[0].project_url, null);
+  await p.alerts.refresh();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await rows(backend, 'select project_url from public.naps_push_config'))[0].project_url, url);
+  assert.equal(p.alerts.state.phase, 'needs-function');
+  const calls = backend.calls.filter((c) => c.name === 'naps_push_set_url').length;
+  await p.alerts.refresh();
+  assert.equal(backend.calls.filter((c) => c.name === 'naps_push_set_url').length, calls, 'once per session');
+});
+
 test('with sync off there is nothing to set up yet', { skip }, async () => {
   const backend = await createBackend({ push: true });
   const p = phone(backend);
